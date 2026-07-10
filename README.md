@@ -7,38 +7,31 @@ bmlsub 是 **Billion Meta Lab (BML)** 的动漫字幕制作与发布工具包，
 ### pip 安装
 
 ```bash
-# 核心功能（提取、编码、封裝、字幕校驗、R2 上傳）
-pip install bml-subpro
+# git 协议（需要系统有 git）
 
-# 包含 AI 转录（仅 Apple Silicon）
-pip install "bml-subpro[transcribe]"
-
-# 包含种子生成（需系統 libtorrent）
-pip install "bml-subpro[torrent]"
-
-# 全部功能
-pip install "bml-subpro[all]"
+pip install git+https://github.com/microseventh/bmlsub.git
 ```
 
 ### 系统依赖
 
-| 工具 | 安装方式 | 用途 | 必需 |
-|------|---------|------|------|
-| `ffmpeg` | `brew install ffmpeg` / `apt install ffmpeg` | 音视频编解码、字幕提取/烧录 | ✅ |
-| `mkvtoolnix` | `brew install mkvtoolnix` / `apt install mkvtoolnix` | MKV 封装、元数据清理 | ✅ |
+
+| 工具                   | 安装方式                                                               | 用途                           | 必需 |
+| ---------------------- | ---------------------------------------------------------------------- | ------------------------------ | ---- |
+| `ffmpeg`               | `brew install ffmpeg` / `apt install ffmpeg`                           | 音视频编解码、字幕提取/烧录    | ✅   |
+| `mkvtoolnix`           | `brew install mkvtoolnix` / `apt install mkvtoolnix`                   | MKV 封装、元数据清理           | ✅   |
 | `libtorrent-rasterbar` | `brew install libtorrent-rasterbar` / `apt install python3-libtorrent` | BT 种子生成（[torrent] extra） | 可选 |
-| `croc` | `brew install croc` / `curl https://getcroc.schollz.com \| bash` | P2P 加密传输 | 可选 |
-| `rclone` | `brew install rclone` / `apt install rclone` | R2 → 服务器同步（服务器端） | 可选 |
+| `croc`                 | `brew install croc` / `curl https://getcroc.schollz.com | bash`        | P2P 加密传输                   | 可选 |
+| `rclone`               | `brew install rclone` / `apt install rclone`                           | R2 → 服务器同步（服务器端）   | 可选 |
 
 ### 开发安装
 
 ```bash
-git clone https://github.com/billion-metalab/bmlsub.git
+git clone https://github.com/microseventh/bmlsub.git
 cd bmlsub
 pip install -e ".[all]"
 ```
 
-> **完整可运行示例见 [01/test_pyjs.ipynb](01/test_pyjs.ipynb)** — 包含从头到尾的完整流水线代码，可作为实际项目模板参考。
+> **完整可运行示例见 [rei.ipynb](https://github.com/microseventh/bmlsub/blob/main/rei.ipynb)** — 包含从头到尾的完整流水线代码，可作为实际项目模板参考。
 
 ---
 
@@ -199,14 +192,14 @@ else:
 **`Transcriber` 构造函数：**
 
 
-| 参数            | 类型         | 默认值                                   | 说明                                 |
-| --------------- | ------------ | ---------------------------------------- | ------------------------------------ |
-| `model`         | `str`        | `"mlx-community/whisper-large-v3-turbo"` | 默认模型（HF repo 路径）             |
-| `language`      | `str`        | `"ja"`                                   | 音频语言代码                         |
-| `chunk_sec`     | `int`        | `240`                                    | 分割转录时每段切片长度（秒）         |
-| `overlap_sec`   | `int`        | `5`                                      | 相邻切片重叠时长（秒），防止边界截断 |
-| `export_format` | `str`        | `"mp3"`                                  | 切片导出音频格式                     |
-| `output_root`   | `str | Path` | `"./output_transcripts"`                 | 转录结果输出根目录                   |
+| 参数            | 类型  | 默认值                                   | 说明                                 |
+| --------------- | ----- | ---------------------------------------- | ------------------------------------ |
+| `model`         | `str` | `"mlx-community/whisper-large-v3-turbo"` | 默认模型（HF repo 路径）             |
+| `language`      | `str` | `"ja"`                                   | 音频语言代码                         |
+| `chunk_sec`     | `int` | `240`                                    | 分割转录时每段切片长度（秒）         |
+| `overlap_sec`   | `int` | `5`                                      | 相邻切片重叠时长（秒），防止边界截断 |
+| `export_format` | `str` | `"mp3"`                                  | 切片导出音频格式                     |
+| `output_root`   | `str  | Path`                                    | `"./output_transcripts"`             |
 
 **`transcribe_direct(audio_path, model=None, output_path=None, force=False)`：**
 
@@ -269,10 +262,10 @@ if SRC.exists():
 **`Encoder` 构造函数：**
 
 
-| 参数          | 类型                  | 默认值                   | 说明                       |
-| ------------- | --------------------- | ------------------------ | -------------------------- |
-| `hevc_preset` | `EncodePreset | None` | `PRESET_HEVC_VT_DEFAULT` | HEVC VideoToolbox 编码预设 |
-| `x264_preset` | `EncodePreset | None` | `PRESET_X264_SLOW`       | x264 软件编码预设          |
+| 参数          | 类型          | 默认值 | 说明                     |
+| ------------- | ------------- | ------ | ------------------------ |
+| `hevc_preset` | `EncodePreset | None`  | `PRESET_HEVC_VT_DEFAULT` |
+| `x264_preset` | `EncodePreset | None`  | `PRESET_X264_SLOW`       |
 
 **`encode_hevc_vt(src, dst=None, audio_streams=None, strip_metadata=True)` → `Path`：**
 
@@ -327,9 +320,9 @@ for ass in sorted(EP_DIR.glob("*.ass")):
 **`SubtitleValidator` 构造函数：**
 
 
-| 参数       | 类型                      | 默认值            | 说明                                    |
-| ---------- | ------------------------- | ----------------- | --------------------------------------- |
-| `standard` | `SubtitleStandard | None` | `SUB_STANDARD_HD` | 字幕规范，决定校验的 ASS 头部字段目标值 |
+| 参数       | 类型              | 默认值 | 说明              |
+| ---------- | ----------------- | ------ | ----------------- |
+| `standard` | `SubtitleStandard | None`  | `SUB_STANDARD_HD` |
 
 **`SubtitleStandard` 数据类：**
 
@@ -441,13 +434,13 @@ if targets:
 **`TorrentCreator` 构造函数：**
 
 
-| 参数             | 类型               | 默认值                            | 说明                                              |
-| ---------------- | ------------------ | --------------------------------- | ------------------------------------------------- |
-| `trackers`       | `list[str] | None` | `None`（使用 `DEFAULT_TRACKERS`） | 自定义 tracker 列表                               |
-| `extra_trackers` | `list[str] | None` | `None`                            | 追加的额外 tracker（自动去重）                    |
-| `piece_length`   | `int | None`       | `None`（自动计算）                | 分块大小（字节），自动选择使块数在 1000-2000 之间 |
-| `comment`        | `str`              | `""`                              | 种子注释                                          |
-| `created_by`     | `str`              | `"BML"`                           | 创建者标识                                        |
+| 参数             | 类型       | 默认值  | 说明                              |
+| ---------------- | ---------- | ------- | --------------------------------- |
+| `trackers`       | `list[str] | None`   | `None`（使用 `DEFAULT_TRACKERS`） |
+| `extra_trackers` | `list[str] | None`   | `None`                            |
+| `piece_length`   | `int       | None`   | `None`（自动计算）                |
+| `comment`        | `str`      | `""`    | 种子注释                          |
+| `created_by`     | `str`      | `"BML"` | 创建者标识                        |
 
 **`create(src, dst=None, v1_only=False)` → `Path`：**
 
@@ -503,13 +496,13 @@ if targets:
 **`R2Uploader` 构造函数：**
 
 
-| 参数                | 类型         | 默认值               | 说明                                                                |
-| ------------------- | ------------ | -------------------- | ------------------------------------------------------------------- |
-| `account_id`        | `str | None` | `None`（从配置读取） | Cloudflare Account ID                                               |
-| `access_key_id`     | `str | None` | `None`（从配置读取） | R2 API Token Access Key ID                                          |
-| `secret_access_key` | `str | None` | `None`（从配置读取） | R2 API Token Secret Access Key                                      |
-| `bucket_name`       | `str | None` | `None`（从配置读取） | R2 存储桶名称                                                       |
-| `endpoint`          | `str | None` | `None`（自动拼接）   | 自定义 S3 端点，默认`https://{account_id}.r2.cloudflarestorage.com` |
+| 参数                | 类型 | 默认值 | 说明                 |
+| ------------------- | ---- | ------ | -------------------- |
+| `account_id`        | `str | None`  | `None`（从配置读取） |
+| `access_key_id`     | `str | None`  | `None`（从配置读取） |
+| `secret_access_key` | `str | None`  | `None`（从配置读取） |
+| `bucket_name`       | `str | None`  | `None`（从配置读取） |
+| `endpoint`          | `str | None`  | `None`（自动拼接）   |
 
 凭证优先级：**构造函数参数 > 环境变量 > `~/.config/bml/r2_config.json`**
 
@@ -575,14 +568,14 @@ if torrent_files:
 **`RemoteSeeder` 构造函数：**
 
 
-| 参数            | 类型         | 默认值                          | 说明                                                   |
-| --------------- | ------------ | ------------------------------- | ------------------------------------------------------ |
-| `ssh_alias`     | `str`        | （必需）                        | `~/.ssh/config` 中配置的别名                           |
-| `host`          | `str | None` | `None`（从配置读取）            | qB Web UI 主机名（服务器上可访问的地址），支持完整 URL |
-| `port`          | `int | None` | `None`（从配置读取，默认 8081） | qB Web UI 端口                                         |
-| `username`      | `str | None` | `None`（从配置读取）            | qB 登录用户名                                          |
-| `password`      | `str | None` | `None`（从配置读取）            | qB 登录密码                                            |
-| `download_base` | `str | None` | `None`（从配置读取）            | 服务器上视频文件下载根目录                             |
+| 参数            | 类型  | 默认值   | 说明                            |
+| --------------- | ----- | -------- | ------------------------------- |
+| `ssh_alias`     | `str` | （必需） | `~/.ssh/config` 中配置的别名    |
+| `host`          | `str  | None`    | `None`（从配置读取）            |
+| `port`          | `int  | None`    | `None`（从配置读取，默认 8081） |
+| `username`      | `str  | None`    | `None`（从配置读取）            |
+| `password`      | `str  | None`    | `None`（从配置读取）            |
+| `download_base` | `str  | None`    | `None`（从配置读取）            |
 
 凭证优先级：**构造函数参数 > 环境变量 > `~/.config/bml/qb_config.json`**
 
@@ -646,23 +639,23 @@ for t in [t for t in (mp4_chs_t, mp4_cht_t, mkv_hevc_t) if t.exists()]:
 **`Publisher.publish_anibt()` 完整参数列表：**
 
 
-| 参数               | 类型                | 默认值                        | 说明                                                                               |
-| ------------------ | ------------------- | ----------------------------- | ---------------------------------------------------------------------------------- |
-| `bgm_id`           | `int`               | （必需）                      | Bangumi 条目 ID                                                                    |
-| `title`            | `str`               | （必需）                      | 发布标题（含组名、番名、集数等完整信息）                                           |
-| `episode_key`      | `str`               | （必需）                      | 集数标识，如`"11"`                                                                 |
-| `torrent_path`     | `str | Path | None` | `None`                        | 本地`.torrent` 文件路径                                                            |
-| `magnet_base64`    | `str | None`        | `None`                        | Base64 编码的 magnet URI（方式一）                                                 |
-| `resolution`       | `str`               | `"1080p"`                     | 分辨率                                                                             |
-| `languages`        | `list[str] | None`  | `None`（→`[]`）              | 语言标签列表，如`["CHS", "CHT", "JP"]`                                             |
-| `subtitle`         | `str`               | `"INTERNAL"`                  | 字幕类型：`"INTERNAL"` / `"EMBEDDED"`                                              |
-| `fmt`              | `str`               | `"MKV"`                       | 格式：`"MKV"` / `"MP4"`                                                            |
-| `file_size`        | `int | None`        | `None`（自动从 torrent 读取） | 文件大小（字节）                                                                   |
-| `notes`            | `str`               | `""`                          | 发布说明（Markdown）                                                               |
-| `trackers`         | `list[str] | None`  | `None`（自动从 torrent 读取） | Tracker 列表                                                                       |
-| `token`            | `str | None`        | `None`（从配置读取）          | API Token                                                                          |
-| `api_url`          | `str | None`        | `None`（从配置读取）          | API 地址                                                                           |
-| `use_torrent_file` | `bool`              | `False`                       | `True` = 直接上传 `.torrent` 文件（multipart）；`False` = 提取 magnet 以 JSON 提交 |
+| 参数               | 类型       | 默认值       | 说明                                                                               |
+| ------------------ | ---------- | ------------ | ---------------------------------------------------------------------------------- |
+| `bgm_id`           | `int`      | （必需）     | Bangumi 条目 ID                                                                    |
+| `title`            | `str`      | （必需）     | 发布标题（含组名、番名、集数等完整信息）                                           |
+| `episode_key`      | `str`      | （必需）     | 集数标识，如`"11"`                                                                 |
+| `torrent_path`     | `str       | Path         | None`                                                                              |
+| `magnet_base64`    | `str       | None`        | `None`                                                                             |
+| `resolution`       | `str`      | `"1080p"`    | 分辨率                                                                             |
+| `languages`        | `list[str] | None`        | `None`（→`[]`）                                                                   |
+| `subtitle`         | `str`      | `"INTERNAL"` | 字幕类型：`"INTERNAL"` / `"EMBEDDED"`                                              |
+| `fmt`              | `str`      | `"MKV"`      | 格式：`"MKV"` / `"MP4"`                                                            |
+| `file_size`        | `int       | None`        | `None`（自动从 torrent 读取）                                                      |
+| `notes`            | `str`      | `""`         | 发布说明（Markdown）                                                               |
+| `trackers`         | `list[str] | None`        | `None`（自动从 torrent 读取）                                                      |
+| `token`            | `str       | None`        | `None`（从配置读取）                                                               |
+| `api_url`          | `str       | None`        | `None`（从配置读取）                                                               |
+| `use_torrent_file` | `bool`     | `False`      | `True` = 直接上传 `.torrent` 文件（multipart）；`False` = 提取 magnet 以 JSON 提交 |
 
 凭证优先级：**函数参数 > 环境变量 `ANIBT_TOKEN`/`ANIBT_API_URL` > `~/.config/bml/anibt_config.json`**
 
@@ -734,16 +727,16 @@ from bmlsub import (
 `EncodePreset` 封装了 ffmpeg 视频 + 音频编码参数，通过 `to_ffmpeg_video_params()` 和 `to_ffmpeg_audio_params()` 生成 ffmpeg 命令行参数。
 
 
-| 参数            | 类型         | 默认值                | 说明                                                                  |
-| --------------- | ------------ | --------------------- | --------------------------------------------------------------------- |
-| `codec`         | `str`        | `"hevc_videotoolbox"` | 视频编码器：`"hevc_videotoolbox"`（Mac 硬压）或 `"libx264"`（软编码） |
-| `preset`        | `str`        | `"slow"`              | x264 preset：`"medium"`、`"slow"`、`"veryslow"` 等（仅 libx264 有效） |
-| `crf`           | `int | None` | `None`                | 恒定质量参数。`None` → VideoToolbox 用 `-q:v`；libx264 默认 22       |
-| `quality`       | `int`        | `60`                  | VideoToolbox 质量参数 (0-100)，对应 ffmpeg`-q:v`                      |
-| `pixel_fmt`     | `str`        | `"p010le"`            | 像素格式：`"p010le"`（VT 10bit）或 `"yuv420p"`（x264 8bit）           |
-| `audio_codec`   | `str`        | `"aac"`               | 音频编码器                                                            |
-| `audio_bitrate` | `str`        | `"192k"`              | 音频码率                                                              |
-| `extra_params`  | `list[str]`  | `[]`                  | 额外 ffmpeg 参数（如`-tune film`、`-x264-params ...`）                |
+| 参数            | 类型        | 默认值                | 说明                                                                  |
+| --------------- | ----------- | --------------------- | --------------------------------------------------------------------- |
+| `codec`         | `str`       | `"hevc_videotoolbox"` | 视频编码器：`"hevc_videotoolbox"`（Mac 硬压）或 `"libx264"`（软编码） |
+| `preset`        | `str`       | `"slow"`              | x264 preset：`"medium"`、`"slow"`、`"veryslow"` 等（仅 libx264 有效） |
+| `crf`           | `int        | None`                 | `None`                                                                |
+| `quality`       | `int`       | `60`                  | VideoToolbox 质量参数 (0-100)，对应 ffmpeg`-q:v`                      |
+| `pixel_fmt`     | `str`       | `"p010le"`            | 像素格式：`"p010le"`（VT 10bit）或 `"yuv420p"`（x264 8bit）           |
+| `audio_codec`   | `str`       | `"aac"`               | 音频编码器                                                            |
+| `audio_bitrate` | `str`       | `"192k"`              | 音频码率                                                              |
+| `extra_params`  | `list[str]` | `[]`                  | 额外 ffmpeg 参数（如`-tune film`、`-x264-params ...`）                |
 
 **方法：**
 
@@ -857,18 +850,18 @@ from bmlsub import MediaExtractor, ExtractedTrack, PreferredSubs, SubtitleInfo
 **方法一览：**
 
 
-| 方法                                             | 说明                                    | 返回类型                         |
-| ------------------------------------------------ | --------------------------------------- | -------------------------------- |
-| `find_digit_mkvs()`                              | 找到纯数字命名（如`01.mkv`）的 MKV 文件 | `list[Path]`                     |
-| `find_all_mkvs()`                                | 找到所有`.mkv` 文件                     | `list[Path]`                     |
-| `probe_streams(video)`                           | ffprobe 获取所有流的 JSON 信息          | `list[dict]`                     |
-| `list_subtitle_streams(video)`                   | 列出字幕流元信息（不提取）              | `list[SubtitleInfo]`             |
-| `extract_audio_tracks(video, progress=None)`     | 提取所有音轨 → AAC 192k                | `list[ExtractedTrack]`           |
-| `extract_subtitle_tracks(video)`                 | 提取所有字幕轨 → ASS                   | `list[ExtractedTrack]`           |
-| `extract_preferred_subtitles(video, langs=None)` | 智能筛选（中/英/日优先）                | `PreferredSubs | None`           |
-| `extract_all(video)`                             | 一键全量提取                            | `(音频列表, 字幕列表)`           |
-| `extract_smart(video)`                           | 音轨全量 + 字幕智能筛选                 | `(音频列表, PreferredSubs|None)` |
-| `get_audio_track(video, index=0)`                | 快速获取第 N 条音轨                     | `Path | None`                    |
+| 方法                                             | 说明                                    | 返回类型                  |
+| ------------------------------------------------ | --------------------------------------- | ------------------------- |
+| `find_digit_mkvs()`                              | 找到纯数字命名（如`01.mkv`）的 MKV 文件 | `list[Path]`              |
+| `find_all_mkvs()`                                | 找到所有`.mkv` 文件                     | `list[Path]`              |
+| `probe_streams(video)`                           | ffprobe 获取所有流的 JSON 信息          | `list[dict]`              |
+| `list_subtitle_streams(video)`                   | 列出字幕流元信息（不提取）              | `list[SubtitleInfo]`      |
+| `extract_audio_tracks(video, progress=None)`     | 提取所有音轨 → AAC 192k                | `list[ExtractedTrack]`    |
+| `extract_subtitle_tracks(video)`                 | 提取所有字幕轨 → ASS                   | `list[ExtractedTrack]`    |
+| `extract_preferred_subtitles(video, langs=None)` | 智能筛选（中/英/日优先）                | `PreferredSubs            |
+| `extract_all(video)`                             | 一键全量提取                            | `(音频列表, 字幕列表)`    |
+| `extract_smart(video)`                           | 音轨全量 + 字幕智能筛选                 | `(音频列表, PreferredSubs |
+| `get_audio_track(video, index=0)`                | 快速获取第 N 条音轨                     | `Path                     |
 
 **`extract_preferred_subtitles(video, langs=None)` 详细说明：**
 
@@ -1012,25 +1005,25 @@ from bmlsub import (
 所有参数均为可选：`resolve_model()` 不带参数即可获得当前平台最佳推荐。
 
 
-| 参数            | 类型         | 默认值  | 说明                                                         |
-| --------------- | ------------ | ------- | ------------------------------------------------------------ |
-| `model_id`      | `str | None` | `None`  | `None`=自动推荐；HF 路径=使用指定模型；本地路径=跳过下载检查 |
-| `language`      | `str`        | `"ja"`  | 音频语言，影响日语专用模型的推荐                             |
-| `backend`       | `str | None` | `None`  | 强制指定后端，`None`=根据平台自动选择                        |
-| `auto_download` | `bool`       | `False` | `True`=不可用时自动下载                                      |
+| 参数            | 类型   | 默认值  | 说明                             |
+| --------------- | ------ | ------- | -------------------------------- |
+| `model_id`      | `str   | None`   | `None`                           |
+| `language`      | `str`  | `"ja"`  | 音频语言，影响日语专用模型的推荐 |
+| `backend`       | `str   | None`   | `None`                           |
+| `auto_download` | `bool` | `False` | `True`=不可用时自动下载          |
 
 **`ResolvedModel` 数据类字段：**
 
 
-| 字段             | 类型                         | 说明                                      |
-| ---------------- | ---------------------------- | ----------------------------------------- |
-| `model_id`       | `str`                        | 最终使用的模型 ID 或路径                  |
-| `backend`        | `str`                        | `"mlx"` / `"faster_whisper"` / `"openai"` |
-| `available`      | `bool`                       | 模型是否在本地可用                        |
-| `cache_path`     | `str | None`                 | 本地缓存路径                              |
-| `platform_info`  | `dict`                       | `detect_platform()` 返回值                |
-| `recommendation` | `ModelRecommendation | None` | 匹配到的推荐（`None`=用户自定义）         |
-| `notes`          | `list[str]`                  | 额外指引/警告信息                         |
+| 字段             | 类型                 | 说明                                      |
+| ---------------- | -------------------- | ----------------------------------------- |
+| `model_id`       | `str`                | 最终使用的模型 ID 或路径                  |
+| `backend`        | `str`                | `"mlx"` / `"faster_whisper"` / `"openai"` |
+| `available`      | `bool`               | 模型是否在本地可用                        |
+| `cache_path`     | `str                 | None`                                     |
+| `platform_info`  | `dict`               | `detect_platform()` 返回值                |
+| `recommendation` | `ModelRecommendation | None`                                     |
+| `notes`          | `list[str]`          | 额外指引/警告信息                         |
 
 **使用示例：**
 
@@ -1109,14 +1102,14 @@ from bmlsub import Transcriber, TranscriptionError, model_short_name
 **构造函数：`Transcriber(model, language, chunk_sec=240, overlap_sec=5, export_format="mp3", output_root="./output_transcripts")`**
 
 
-| 参数            | 类型         | 默认值                                   | 说明                   |
-| --------------- | ------------ | ---------------------------------------- | ---------------------- |
-| `model`         | `str`        | `"mlx-community/whisper-large-v3-turbo"` | 默认模型 HF 路径       |
-| `language`      | `str`        | `"ja"`                                   | 音频语言代码           |
-| `chunk_sec`     | `int`        | `240`                                    | 分割转录切片长度（秒） |
-| `overlap_sec`   | `int`        | `5`                                      | 相邻切片重叠秒数       |
-| `export_format` | `str`        | `"mp3"`                                  | 切片导出音频格式       |
-| `output_root`   | `str | Path` | `"./output_transcripts"`                 | 转录输出根目录         |
+| 参数            | 类型  | 默认值                                   | 说明                     |
+| --------------- | ----- | ---------------------------------------- | ------------------------ |
+| `model`         | `str` | `"mlx-community/whisper-large-v3-turbo"` | 默认模型 HF 路径         |
+| `language`      | `str` | `"ja"`                                   | 音频语言代码             |
+| `chunk_sec`     | `int` | `240`                                    | 分割转录切片长度（秒）   |
+| `overlap_sec`   | `int` | `5`                                      | 相邻切片重叠秒数         |
+| `export_format` | `str` | `"mp3"`                                  | 切片导出音频格式         |
+| `output_root`   | `str  | Path`                                    | `"./output_transcripts"` |
 
 **`transcribe_direct(audio_path, model=None, output_path=None, force=False)` → `Path | None`：**
 
@@ -1173,12 +1166,12 @@ from bmlsub import Encoder
 **`encode_hevc_vt(src, dst=None, audio_streams=None, strip_metadata=True)` → `Path`：**
 
 
-| 参数             | 类型               | 默认值                                  | 说明               |
-| ---------------- | ------------------ | --------------------------------------- | ------------------ |
-| `src`            | `Path`             | （必需）                                | 源 MKV 文件        |
-| `dst`            | `Path | None`      | `None`（→ `{src.stem}_HEVC10bit.mkv`） | 输出路径           |
-| `audio_streams`  | `list[int] | None` | `None`（保留全部音轨）                  | 要保留的音轨流索引 |
-| `strip_metadata` | `bool`             | `True`                                  | 编码后清理元数据   |
+| 参数             | 类型       | 默认值   | 说明                                    |
+| ---------------- | ---------- | -------- | --------------------------------------- |
+| `src`            | `Path`     | （必需） | 源 MKV 文件                             |
+| `dst`            | `Path      | None`    | `None`（→ `{src.stem}_HEVC10bit.mkv`） |
+| `audio_streams`  | `list[int] | None`    | `None`（保留全部音轨）                  |
+| `strip_metadata` | `bool`     | `True`   | 编码后清理元数据                        |
 
 编码流程：
 
@@ -1189,12 +1182,12 @@ from bmlsub import Encoder
 **`encode_x264(src, dst, ass_subtitle=None, preset=None)` → `Path`：**
 
 
-| 参数           | 类型                  | 默认值                            | 说明                                                |
-| -------------- | --------------------- | --------------------------------- | --------------------------------------------------- |
-| `src`          | `Path`                | （必需）                          | 源视频                                              |
-| `dst`          | `Path`                | （必需）                          | 输出`.mp4` 路径                                     |
-| `ass_subtitle` | `Path | None`         | `None`                            | ASS 字幕（通过`-vf ass=...` 烧录），`None` = 不烧录 |
-| `preset`       | `EncodePreset | None` | `None`（使用 `self.x264_preset`） | 编码预设                                            |
+| 参数           | 类型          | 默认值   | 说明                              |
+| -------------- | ------------- | -------- | --------------------------------- |
+| `src`          | `Path`        | （必需） | 源视频                            |
+| `dst`          | `Path`        | （必需） | 输出`.mp4` 路径                   |
+| `ass_subtitle` | `Path         | None`    | `None`                            |
+| `preset`       | `EncodePreset | None`    | `None`（使用 `self.x264_preset`） |
 
 **`strip_metadata(video_path)` → `Path`：**
 
@@ -1223,7 +1216,7 @@ from bmlsub import SubtitleValidator
 
 | 方法                                                       | 说明                                      | 返回类型         |
 | ---------------------------------------------------------- | ----------------------------------------- | ---------------- |
-| `check_subtitle_exists(episode_dir, episode_id, sub_type)` | 检查`{ep_id}.{sub_type}&jpn.ass` 是否存在 | `Path | None`    |
+| `check_subtitle_exists(episode_dir, episode_id, sub_type)` | 检查`{ep_id}.{sub_type}&jpn.ass` 是否存在 | `Path            |
 | `validate_for_episode(episode_dir, episode_id)`            | 单集完整校验（chs + cht）                 | `dict`           |
 | `validate_ass_header(ass_path)`                            | 检查 ASS 头部合规性                       | `dict[str, str]` |
 | `standardize_ass(ass_path, output_path=None)`              | 修正 ASS 头部                             | `Path`           |
@@ -1263,11 +1256,11 @@ from bmlsub import Packager, PackagingError
 **构造函数：`Packager(episode_dir, episode_id, config=None)`**
 
 
-| 参数          | 类型                    | 说明                                   |
-| ------------- | ----------------------- | -------------------------------------- |
-| `episode_dir` | `Path | str`            | 集数目录                               |
-| `episode_id`  | `str`                   | 集数编号，如`"01"`                     |
-| `config`      | `PipelineConfig | None` | 流水线配置，默认新建`PipelineConfig()` |
+| 参数          | 类型            | 说明               |
+| ------------- | --------------- | ------------------ |
+| `episode_dir` | `Path           | str`               |
+| `episode_id`  | `str`           | 集数编号，如`"01"` |
+| `config`      | `PipelineConfig | None`              |
 
 **`get_available_files()` → `dict`：**
 
@@ -1319,22 +1312,22 @@ from bmlsub import TorrentCreator, DEFAULT_TRACKERS
 **构造函数：`TorrentCreator(trackers=None, extra_trackers=None, piece_length=None, comment="", created_by="BML")`**
 
 
-| 参数             | 类型               | 默认值                          | 说明                                                   |
-| ---------------- | ------------------ | ------------------------------- | ------------------------------------------------------ |
-| `trackers`       | `list[str] | None` | `None`（→ `DEFAULT_TRACKERS`） | 自定义 tracker 列表，`None` 使用内建 42 个动漫 tracker |
-| `extra_trackers` | `list[str] | None` | `None`                          | 额外追加的 tracker，自动去重                           |
-| `piece_length`   | `int | None`       | `None`（自动计算）              | 分块大小（字节）                                       |
-| `comment`        | `str`              | `""`                            | 种子注释                                               |
-| `created_by`     | `str`              | `"BML"`                         | 创建者标识                                             |
+| 参数             | 类型       | 默认值  | 说明                            |
+| ---------------- | ---------- | ------- | ------------------------------- |
+| `trackers`       | `list[str] | None`   | `None`（→ `DEFAULT_TRACKERS`） |
+| `extra_trackers` | `list[str] | None`   | `None`                          |
+| `piece_length`   | `int       | None`   | `None`（自动计算）              |
+| `comment`        | `str`      | `""`    | 种子注释                        |
+| `created_by`     | `str`      | `"BML"` | 创建者标识                      |
 
 **`create(src, dst=None, v1_only=False)` → `Path`：**
 
 
-| 参数      | 类型                | 说明                                                   |
-| --------- | ------------------- | ------------------------------------------------------ |
-| `src`     | `Path | str`        | 源文件或目录                                           |
-| `dst`     | `Path | str | None` | 输出`.torrent` 路径，`None` 自动放 `src` 同目录        |
-| `v1_only` | `bool`              | `True` = 仅 v1（兼容动漫花园）；`False` = v1+v2 hybrid |
+| 参数      | 类型   | 说明                                                   |
+| --------- | ------ | ------------------------------------------------------ |
+| `src`     | `Path  | str`                                                   |
+| `dst`     | `Path  | str                                                    |
+| `v1_only` | `bool` | `True` = 仅 v1（兼容动漫花园）；`False` = v1+v2 hybrid |
 
 每个 tracker 分配独立 tier，确保 DHT/PEX 之外的 tracker 冗余。
 
@@ -1375,11 +1368,11 @@ from bmlsub import Transfer, TransferError, SSHConnectionError, HashVerification
 完整传输流程，返回 `True` = 全部传输并校验通过。
 
 
-| 参数          | 类型               | 默认值   | 说明                      |
-| ------------- | ------------------ | -------- | ------------------------- |
-| `local_paths` | `list[str | Path]` | （必需） | 本地文件/目录列表         |
-| `verify`      | `bool`             | `True`   | 是否执行远程 SHA-256 校验 |
-| `cleanup`     | `bool`             | `True`   | 是否清理两端临时 tar.gz   |
+| 参数          | 类型      | 默认值 | 说明                      |
+| ------------- | --------- | ------ | ------------------------- |
+| `local_paths` | `list[str | Path]` | （必需）                  |
+| `verify`      | `bool`    | `True` | 是否执行远程 SHA-256 校验 |
+| `cleanup`     | `bool`    | `True` | 是否清理两端临时 tar.gz   |
 
 传输协议：
 
@@ -1453,14 +1446,14 @@ from bmlsub import RemoteSeeder, SeederError
 **构造函数：`RemoteSeeder(ssh_alias, host=None, port=None, username=None, password=None, download_base=None)`**
 
 
-| 参数            | 类型         | 默认值                                    | 说明                                   |
-| --------------- | ------------ | ----------------------------------------- | -------------------------------------- |
-| `ssh_alias`     | `str`        | （必需）                                  | SSH 别名（`~/.ssh/config`）            |
-| `host`          | `str | None` | `None`（→ `"localhost"`）                | qB Web UI 主机，支持`http://` 完整 URL |
-| `port`          | `int | None` | `None`（→ `8081`）                       | qB Web UI 端口                         |
-| `username`      | `str | None` | `None`（→ `"admin"`）                    | 登录用户名                             |
-| `password`      | `str | None` | `None`（→ `""`）                         | 登录密码                               |
-| `download_base` | `str | None` | `None`（→ `""`）                   | 服务器端下载根目录（须配置）            |
+| 参数            | 类型  | 默认值   | 说明                        |
+| --------------- | ----- | -------- | --------------------------- |
+| `ssh_alias`     | `str` | （必需） | SSH 别名（`~/.ssh/config`） |
+| `host`          | `str  | None`    | `None`（→ `"localhost"`）  |
+| `port`          | `int  | None`    | `None`（→ `8081`）         |
+| `username`      | `str  | None`    | `None`（→ `"admin"`）      |
+| `password`      | `str  | None`    | `None`（→ `""`）           |
+| `download_base` | `str  | None`    | `None`（→ `""`）           |
 
 凭证优先级：**参数 > 环境变量（`QB_HOST`、`QB_PORT`、`QB_USERNAME`、`QB_PASSWORD`、`QB_DOWNLOAD_BASE`）> `~/.config/bml/qb_config.json`**
 
@@ -1478,12 +1471,12 @@ from bmlsub import RemoteSeeder, SeederError
 **`add_torrent()` 参数：**
 
 
-| 参数                  | 类型         | 默认值                            | 说明                        |
-| --------------------- | ------------ | --------------------------------- | --------------------------- |
-| `remote_torrent_path` | `str | Path` | （必需）                          | 服务器上`.torrent` 绝对路径 |
-| `save_path`           | `str | None` | `None`（→ `self.download_base`） | 视频文件保存路径            |
-| `skip_checking`       | `bool`       | `True`                            | 跳过哈希校验                |
-| `paused`              | `bool`       | `False`                           | `True` = 暂停状态添加       |
+| 参数                  | 类型   | 默认值  | 说明                              |
+| --------------------- | ------ | ------- | --------------------------------- |
+| `remote_torrent_path` | `str   | Path`   | （必需）                          |
+| `save_path`           | `str   | None`   | `None`（→ `self.download_base`） |
+| `skip_checking`       | `bool` | `True`  | 跳过哈希校验                      |
+| `paused`              | `bool` | `False` | `True` = 暂停状态添加             |
 
 **`add_torrents()` 参数：**
 
@@ -1561,24 +1554,24 @@ from bmlsub import Pipeline
 **`process_episode()` 完整参数：**
 
 
-| 参数              | 类型          | 默认值                | 说明                                  |
-| ----------------- | ------------- | --------------------- | ------------------------------------- |
-| `episode_dir`     | `Path | str`  | （必需）              | 集数目录                              |
-| `episode_id`      | `str | None`  | `None`（自动推断）    | 集数编号                              |
-| `manual_cuts`     | `dict | None` | `None`                | `{"01": ["10:00", "20:00"]}` 手动切点 |
-| `direct_model`    | `str | None`  | `None`                | 直接转录模型                          |
-| `chunked_model`   | `str | None`  | `None`                | 分割转录模型                          |
-| `mkv_template`    | `str | None`  | `None`                | MKV 输出模板                          |
-| `chs_template`    | `str | None`  | `None`                | CHS MP4 模板                          |
-| `cht_template`    | `str | None`  | `None`                | CHT MP4 模板                          |
-| `ssh_config`      | `dict | None` | `None`                | SSH 配置                              |
-| `remote_dir`      | `str`         | `"/opt/qb/downloads"` | 远程目录                              |
-| `qb_host`         | `str | None`  | `None`                | qB 主机                               |
-| `skip_transcribe` | `bool`        | `False`               | 跳过转录                              |
-| `skip_encode`     | `bool`        | `False`               | 跳过编码                              |
-| `skip_package`    | `bool`        | `False`               | 跳过封装                              |
-| `skip_transfer`   | `bool`        | `False`               | 跳过传输                              |
-| `skip_seed`       | `bool`        | `False`               | 跳过做种                              |
+| 参数              | 类型   | 默认值                | 说明               |
+| ----------------- | ------ | --------------------- | ------------------ |
+| `episode_dir`     | `Path  | str`                  | （必需）           |
+| `episode_id`      | `str   | None`                 | `None`（自动推断） |
+| `manual_cuts`     | `dict  | None`                 | `None`             |
+| `direct_model`    | `str   | None`                 | `None`             |
+| `chunked_model`   | `str   | None`                 | `None`             |
+| `mkv_template`    | `str   | None`                 | `None`             |
+| `chs_template`    | `str   | None`                 | `None`             |
+| `cht_template`    | `str   | None`                 | `None`             |
+| `ssh_config`      | `dict  | None`                 | `None`             |
+| `remote_dir`      | `str`  | `"/opt/qb/downloads"` | 远程目录           |
+| `qb_host`         | `str   | None`                 | `None`             |
+| `skip_transcribe` | `bool` | `False`               | 跳过转录           |
+| `skip_encode`     | `bool` | `False`               | 跳过编码           |
+| `skip_package`    | `bool` | `False`               | 跳过封装           |
+| `skip_transfer`   | `bool` | `False`               | 跳过传输           |
+| `skip_seed`       | `bool` | `False`               | 跳过做种           |
 
 ---
 
