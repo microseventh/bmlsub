@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bml-subpro"
+version = "0.1.0"
+description = "BML 动漫字幕制作与发布流水线 — MKV 提取 → AI 转录 → HEVC 编码 → 封装 → 种子 → 传输 → 发布"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Billion Meta Lab", email = "bml@example.com"},
+]
+keywords = ["anime", "subtitle", "encoding", "hevc", "videotoolbox", "torrent", "whisper", "mlx"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Multimedia :: Video :: Conversion",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+
+dependencies = [
+    "tqdm>=4.64",
+    "boto3>=1.28",
+    "botocore>=1.31",
+    "requests>=2.28",
+    "pydub>=0.25",
+    "paramiko>=3.0",
+    "qbittorrent-api>=2023",
+]
+
+[project.optional-dependencies]
+# AI 转录（仅 Apple Silicon）
+transcribe = ["mlx-whisper>=0.3"]
+# 种子生成（需系统安装 libtorrent-rasterbar）
+torrent = ["libtorrent>=2.0"]
+# 全部功能
+all = ["bml-subpro[transcribe,torrent]"]
+
+[project.urls]
+Homepage = "https://github.com/microseventh/bmlsub"
+Repository = "https://github.com/microseventh/bmlsub.git"
+Issues = "https://github.com/microseventh/bmlsub/issues"
+
+[tool.setuptools]
+packages = ["bmlsub"]
