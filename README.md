@@ -291,19 +291,45 @@ if SRC.exists():
 - 返回残留的源泄露标签。空 `dict` = 完全干净。
 - 检查项包括：`_STATISTICS_*` 标签、`BPS`、`DURATION`、`NUMBER_OF_FRAMES`、`title`、`HANDLER_NAME`、`VENDOR_ID` 等。
 
-### 阶段 4：字幕校验 & ASS 头部标准化
+### 阶段 4：字幕处理流水线
 
-清理阶段 1 提取的原始字幕，只保留制作组字幕，然后校验并标准化 ASS 头部。
+**4a.** 清理阶段 1 提取的原始字幕（备份而非删除），只保留制作组字幕。  
+**4b.** 繁化姬 API 简→繁转换（`*.chs&jpn.ass` → `*.cht&jpn.ass`，台湾繁体）。  
+**4c.** 校验并标准化所有 `.ass` 文件的 ASS 头部。
 
 ```python
-# 第一步：清理多余字幕，只保留制作组字幕文件
+# 4a. 清理多余字幕，备份到 _backup/ 目录
 KEEP_PATTERNS = ("*.chs&jpn.ass", "*.cht&jpn.ass", "*.chs.ass", "*.cht.ass")
 
 for f in sorted(EP_DIR.glob("*.ass")):
     if not any(fnmatch.fnmatch(f.name, p) for p in KEEP_PATTERNS):
-        f.unlink()
+        backup_if_exists(f)  # 移动到 _backup/ 而非直接删除
 
-# 第二步：校验并标准化 ASS 头部
+# 4b. 繁化姬 简→繁转换（台湾繁体）
+import requests, time
+
+chs_ass_files = sorted(EP_DIR.glob("*.chs&jpn.ass"))
+for chs_file in chs_ass_files:
+    cht_file = chs_file.with_name(chs_file.name.replace(".chs&jpn.ass", ".cht&jpn.ass"))
+
+    # 幂等保护：繁体字幕已是最新则跳过
+    if cht_file.exists() and cht_file.stat().st_mtime > chs_file.stat().st_mtime:
+        continue
+
+    chs_content = chs_file.read_text(encoding="utf-8")
+    resp = requests.post(
+        "https://api.zhconvert.org/convert",
+        data={"text": chs_content, "converter": "Taiwan"},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    if result.get("code") == 0:
+        backup_if_exists(cht_file)
+        cht_file.write_text(result["data"]["text"], encoding="utf-8")
+    time.sleep(1)  # API 限速
+
+# 4c. 校验并标准化 ASS 头部
 validator = SubtitleValidator(SUB_STANDARD_HD)
 
 for ass in sorted(EP_DIR.glob("*.ass")):
@@ -314,6 +340,8 @@ for ass in sorted(EP_DIR.glob("*.ass")):
     else:
         print(f"  ✅ {ass.name} 已合规")
 ```
+
+> **繁化姬 API**：https://api.zhconvert.org/convert — 免费非商业使用，无需 API Key。参考 [Sublime-Fanhuaji](https://github.com/Fanhuaji/Sublime-Fanhuaji)。
 
 **关键参数说明：**
 
@@ -672,7 +700,9 @@ for t in [t for t in (mp4_chs_t, mp4_cht_t, mkv_hevc_t) if t.exists()]:
 | 1    | 提取音轨 + 字幕        | `{id}.mkv`                                    |
 | 2    | AI 转录                | 音轨 AAC                                      |
 | 3    | HEVC VideoToolbox 编码 | `{id}.mkv`                                    |
-| 4    | 字幕校验 & 标准化      | `.ass` 文件                                   |
+| 4a   | 清理原始字幕（备份）   | `.ass` 文件                                   |
+| 4b   | 繁化姬 简→繁转换       | `{id}.chs&jpn.ass`                            |
+| 4c   | 字幕校验 & 标准化      | `.ass` 文件                                   |
 | 5    | x264 硬压 + ASS 烧录   | `{id}.mkv` + `{id}.chs&jpn.ass`               |
 | 6    | mkvmerge 封装          | `{id}_HEVC10bit.mkv` + 字幕 + 字体            |
 | 7    | 生成 .torrent          | 阶段 5/6 产物                                 |

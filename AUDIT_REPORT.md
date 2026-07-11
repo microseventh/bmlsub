@@ -2,19 +2,20 @@
 
 **审计日期**: 2026-07-10
 **审计范围**: `bmlsub/` 全部 12 个源文件 + 1 个 Jupyter Notebook
-**审计方法**: 静态源码分析 + Notebook 运行时输出验证
+**审计方法**: 静态源码分析 + Notebook 运行时输出验证 
 
 ---
 
 ## 问题总览
 
-| 严重度 | 数量 | 说明 |
-|--------|------|------|
-| 🔴 Critical Bug | 3 | 导致数据丢失、虚假成功反馈 |
-| 🟡 Bug | 7 | 逻辑错误、崩溃风险、资源泄漏 |
-| 🟠 设计不一致 | 4 | SSH/qB/哈希实现碎片化 |
-| 🔵 缺失功能 | 8 | 无 dry-run、无超时、无日志框架 |
-| ⚪ 代码质量 | 11 | 反模式、死代码、类型不一致 |
+
+| 严重度          | 数量 | 说明                           |
+| --------------- | ---- | ------------------------------ |
+| 🔴 Critical Bug | 3    | 导致数据丢失、虚假成功反馈     |
+| 🟡 Bug          | 7    | 逻辑错误、崩溃风险、资源泄漏   |
+| 🟠 设计不一致   | 4    | SSH/qB/哈希实现碎片化          |
+| 🔵 缺失功能     | 8    | 无 dry-run、无超时、无日志框架 |
+| ⚪ 代码质量     | 11   | 反模式、死代码、类型不一致     |
 
 ---
 
@@ -262,11 +263,12 @@ else:
 
 ### #11 — 三种不同的 SSH 实现
 
-| 模块 | 方式 | 配置 |
-|------|------|------|
-| `Transfer` | `paramiko.SSHClient` + `RSAKey` | `dict: {host, port, user, key_path}` |
-| `RemoteSeeder` | `subprocess.run(["ssh", alias, cmd])` | `str: ssh_alias` |
-| `R2Uploader` | `subprocess.run(["ssh", alias, cmd])` | `str: ssh_alias` |
+
+| 模块           | 方式                                  | 配置                                 |
+| -------------- | ------------------------------------- | ------------------------------------ |
+| `Transfer`     | `paramiko.SSHClient` + `RSAKey`       | `dict: {host, port, user, key_path}` |
+| `RemoteSeeder` | `subprocess.run(["ssh", alias, cmd])` | `str: ssh_alias`                     |
+| `R2Uploader`   | `subprocess.run(["ssh", alias, cmd])` | `str: ssh_alias`                     |
 
 `RemoteSeeder._ssh_run` 和 `R2Uploader._ssh_run` 是两个独立的实现，功能几乎相同。
 
@@ -276,10 +278,11 @@ else:
 
 ### #12 — 两种不同的 qBittorrent 操控方式
 
-| 类 | 方式 | 适用场景 |
-|----|------|----------|
-| `Publisher.seed_qbittorrent` | `qbittorrentapi` Python 库直连 | qB Web UI 可直接访问 |
-| `RemoteSeeder` | SSH + curl | qB 藏在防火墙/Docker 后面 |
+
+| 类                           | 方式                           | 适用场景                  |
+| ---------------------------- | ------------------------------ | ------------------------- |
+| `Publisher.seed_qbittorrent` | `qbittorrentapi` Python 库直连 | qB Web UI 可直接访问      |
+| `RemoteSeeder`               | SSH + curl                     | qB 藏在防火墙/Docker 后面 |
 
 `Pipeline.process_episode` 的 `seed_torrents` 方法只使用 `Publisher.seed_qbittorrent`，在 Docker 部署场景下不可用。
 
@@ -289,10 +292,11 @@ else:
 
 ### #13 — SHA-256 实现重复
 
-| 位置 | Buffer Size |
-|------|------------|
-| `Transfer._sha256_local` (transfer.py:178) | 4096 bytes |
-| `R2Uploader._sha256_local` (r2upload.py:369) | 8192 bytes |
+
+| 位置                                         | Buffer Size |
+| -------------------------------------------- | ----------- |
+| `Transfer._sha256_local` (transfer.py:178)   | 4096 bytes  |
+| `R2Uploader._sha256_local` (r2upload.py:369) | 8192 bytes  |
 
 完全相同的逻辑，仅 buffer 大小不同。
 
@@ -310,40 +314,43 @@ else:
 
 ## 🔵 缺失功能
 
-| # | 描述 | 影响 |
-|---|------|------|
-| 15 | **无 dry-run / preview 模式** | 无法预览将执行的命令，所有操作立即执行 |
-| 16 | **分割转录无断点续传** | 转录处理到一半崩溃，只能从头开始 |
-| 17 | **PipelineConfig 无参数校验** | 负数 `chunk_sec`、空 `language` 等静默接受 |
-| 18 | **无日志框架** | 全项目用 `print()` + emoji，无法控制输出级别或写入文件 |
-| 19 | **subprocess 无超时** | `encode.py`, `media.py`, `package.py` 中所有 `subprocess.run()` 均无 `timeout` 参数。ffmpeg/mkvmerge 卡死则 Python 进程永久挂起 |
-| 20 | **rclone remote 名硬编码** | `sync_to_server` 中 `f"r2:{bucket}"` 硬编码 remote 名为 `"r2"`，不灵活 |
-| 21 | **\_hashes 不可持久化** | `R2Uploader._hashes` 是实例内字典，跨 cell/进程丢失 |
-| 22 | **model\_short\_name 仅处理两种前缀** | 其他 HuggingFace 模型名（如 `openai/whisper-base`）无法正确简写 |
+
+| #  | 描述                                  | 影响                                                                                                                            |
+| -- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| 15 | **无 dry-run / preview 模式**         | 无法预览将执行的命令，所有操作立即执行                                                                                          |
+| 16 | **分割转录无断点续传**              | 转录处理到一半崩溃，只能从头开始                                                                                                |
+| 17 | **PipelineConfig 无参数校验**         | 负数`chunk_sec`、空 `language` 等静默接受                                                                                       |
+| 18 | **无日志框架**                        | 全项目用`print()` + emoji，无法控制输出级别或写入文件                                                                           |
+| 19 | **subprocess 无超时**                 | `encode.py`, `media.py`, `package.py` 中所有 `subprocess.run()` 均无 `timeout` 参数。ffmpeg/mkvmerge 卡死则 Python 进程永久挂起 |
+| 20 | **rclone remote 名硬编码**            | `sync_to_server` 中 `f"r2:{bucket}"` 硬编码 remote 名为 `"r2"`，不灵活                                                          |
+| 21 | **\_hashes 不可持久化**               | `R2Uploader._hashes` 是实例内字典，跨 cell/进程丢失                                                                             |
+| 22 | **model\_short\_name 仅处理两种前缀** | 其他 HuggingFace 模型名（如`openai/whisper-base`）无法正确简写                                                                  |
 
 ---
 
 ## ⚪ 代码质量
 
-| # | 文件 | 行号 | 问题描述 |
-|---|------|------|----------|
-| 23 | [encode.py](bmlsub/encode.py#L198) | 198 | `__import__('json')` 反模式，应改为顶部 `import json` |
-| 24 | [transfer.py](bmlsub/transfer.py#L133) | 133 | `'local_archive' in dir()` 脆弱的变量名检测清理模式 |
-| 25 | [package.py](bmlsub/package.py#L284-L291) | 284-291 | 字幕语言检测用 `"chs" in lower` 子串匹配，可能误判 |
-| 26 | [config.py](bmlsub/config.py#L107) | 107 | `output_transcripts_dir` 类型为 `str`，与 `work_dir: Path` 不一致 |
-| 27 | [config.py](bmlsub/config.py#L74) | 74 | `work_dir` 在配置创建时 resolve，cwd 变化后过期 |
-| 28 | [config.py](bmlsub/config.py#L40) | 40 | `extra_params` 仅在 x264 分支追加，HEVC 分支不生效（无文档说明） |
-| 29 | [subtitle.py](bmlsub/subtitle.py#L118-L119) | 118-119 | `standardize_ass` 原地覆盖无备份，正则替换可能损坏文件 |
-| 30 | [transcribe.py](bmlsub/transcribe.py#L58) | 58 | `output_path` 类型标注 `Path\|None` 但实际接受 `str` |
+
+| #  | 文件                                        | 行号    | 问题描述                                                          |
+| -- | ------------------------------------------- | ------- | ----------------------------------------------------------------- |
+| 23 | [encode.py](bmlsub/encode.py#L198)          | 198     | `__import__('json')` 反模式，应改为顶部 `import json`             |
+| 24 | [transfer.py](bmlsub/transfer.py#L133)      | 133     | `'local_archive' in dir()` 脆弱的变量名检测清理模式               |
+| 25 | [package.py](bmlsub/package.py#L284-L291)   | 284-291 | 字幕语言检测用`"chs" in lower` 子串匹配，可能误判                 |
+| 26 | [config.py](bmlsub/config.py#L107)          | 107     | `output_transcripts_dir` 类型为 `str`，与 `work_dir: Path` 不一致 |
+| 27 | [config.py](bmlsub/config.py#L74)           | 74      | `work_dir` 在配置创建时 resolve，cwd 变化后过期                   |
+| 28 | [config.py](bmlsub/config.py#L40)           | 40      | `extra_params` 仅在 x264 分支追加，HEVC 分支不生效（无文档说明）  |
+| 29 | [subtitle.py](bmlsub/subtitle.py#L118-L119) | 118-119 | `standardize_ass` 原地覆盖无备份，正则替换可能损坏文件            |
+| 30 | [transcribe.py](bmlsub/transcribe.py#L58)   | 58      | `output_path` 类型标注 `Path|None` 但实际接受 `str`               |
 
 ---
 
 ## Notebook 集成问题
 
-| # | 阶段 | 问题 | 根因 |
-|---|------|------|------|
-| N1 | 7 (种子) | `v1_only` 参数报错 | #3 — 字节码/源码不同步 |
-| N2 | 11 (做种) | 3/3 成功但报告 0/3 | #1 — SSH 横幅污染 |
+
+| #  | 阶段         | 问题                   | 根因                               |
+| -- | ------------ | ---------------------- | ---------------------------------- |
+| N1 | 7 (种子)     | `v1_only` 参数报错     | #3 — 字节码/源码不同步            |
+| N2 | 11 (做种)    | 3/3 成功但报告 0/3     | #1 — SSH 横幅污染                 |
 | N3 | 10 (R2 拉取) | 6 文件被删但零校验通过 | #2 — 哈希记录丢失 + all_ok 未标记 |
 
 ---

@@ -182,7 +182,8 @@ class SubtitleValidator:
         content = ass_path.read_text(encoding="utf-8")
 
         # 仅解析 [Script Info] 到下一个 [...] 段之间的内容
-        match = re.search(r'\[Script Info\](.*?)\[', content, re.DOTALL)
+        # 用 \n\[ 而非 \[ 确保不会匹配到字段值中的 [ （如 Title: [Seigyoku]）
+        match = re.search(r'\[Script Info\](.*?)\n\[', content, re.DOTALL)
         if not match:
             return header
 
