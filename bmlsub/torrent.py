@@ -5,7 +5,9 @@
 输出到源文件同目录。
 """
 
+from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlencode
 
 from ._backup import backup_if_exists
 
@@ -57,6 +59,50 @@ DEFAULT_TRACKERS: list[str] = [
     "http://ipv6.tracker.harry.lu:80/announce",
     "http://tracker.ipv6tracker.ru/announce",
 ]
+
+
+@dataclass(frozen=True)
+class TorrentMetadata:
+    """本地 .torrent 的元数据与可用于远程添加的磁力链接。"""
+
+    name: str
+    info_hash_v1: str | None
+    info_hash_v2: str | None
+    trackers: tuple[str, ...]
+    magnet_uri: str
+
+
+def read_torrent_metadata(torrent_path: Path | str) -> TorrentMetadata:
+    """读取本地 .torrent，并生成包含名称和 tracker 的标准磁力链接。"""
+    import libtorrent as lt
+
+    torrent_path = Path(torrent_path).expanduser().resolve()
+    if not torrent_path.is_file():
+        raise FileNotFoundError(f"种子文件不存在: {torrent_path}")
+
+    info = lt.torrent_info(str(torrent_path))
+    hashes = info.info_hashes()
+    v1_hash = str(hashes.v1) if hashes.has_v1() else None
+    v2_hash = str(hashes.v2) if hashes.has_v2() else None
+    trackers = tuple(dict.fromkeys(tracker.url for tracker in info.trackers() if tracker.url))
+
+    params: list[tuple[str, str]] = []
+    if v1_hash:
+        params.append(("xt", f"urn:btih:{v1_hash}"))
+    if v2_hash:
+        params.append(("xt", f"urn:btmh:1220{v2_hash}"))
+    if not params:
+        raise ValueError(f"种子不包含可用的 info hash: {torrent_path}")
+    params.append(("dn", info.name()))
+    params.extend(("tr", tracker) for tracker in trackers)
+
+    return TorrentMetadata(
+        name=info.name(),
+        info_hash_v1=v1_hash,
+        info_hash_v2=v2_hash,
+        trackers=trackers,
+        magnet_uri=f"magnet:?{urlencode(params)}",
+    )
 
 
 class TorrentCreator:

@@ -180,10 +180,95 @@ class RemoteSeeder:
         raw = result.stdout.strip()
         ok = self._parse_add_response(raw)
         if ok:
-            print(f"🚀 做种成功: {filename}")
+            print(f"📥 已提交至 qBittorrent: {filename}")
         else:
             print(f"⚠️ 添加失败 {filename}: {raw}")
         return ok
+
+    def add_magnet(self, magnet_uri: str, save_path: str | None = None,
+                   skip_checking: bool = False, paused: bool = False) -> bool:
+        """将磁力链接提交给远程 qBittorrent。
+
+        qBittorrent 必须先获取磁力元数据，之后才会对 save_path 中的现有文件执行校验。
+        返回 True 只表示添加请求已受理，不表示已完成校验或开始做种。
+        """
+        if not self._cookie_remote:
+            raise SeederError("未登录。请先调用 login()")
+        if not magnet_uri.startswith("magnet:?"):
+            raise ValueError("不是有效的磁力链接")
+
+        save_path = (save_path or self.download_base).rstrip("/")
+        paused_str = "true" if paused else "false"
+        skip_str = "true" if skip_checking else "false"
+        cmd = (
+            f"curl -s -X POST "
+            f"-b '{self._cookie_remote}' "
+            f"--data-urlencode 'urls={magnet_uri}' "
+            f"--data-urlencode 'save_path={save_path}' "
+            f"--data-urlencode 'skip_checking={skip_str}' "
+            f"--data-urlencode 'paused={paused_str}' "
+            f"--data-urlencode 'root_folder=false' "
+            f"'{self._base_url}/api/v2/torrents/add'"
+        )
+        result = self._ssh_run(self.ssh_alias, cmd, capture=True)
+        raw = result.stdout.strip()
+        ok = self._parse_add_response(raw)
+        if ok:
+            print("📥 磁力链接已提交至 qBittorrent")
+        else:
+            print(f"⚠️ 磁力添加失败: {raw}")
+        return ok
+
+    def add_magnets(self, magnet_uris: list[str], save_path: str | None = None,
+                    skip_checking: bool = False, paused: bool = False) -> dict[str, bool]:
+        """批量提交磁力链接到远程 qBittorrent。"""
+        if not magnet_uris:
+            print("⚠️ 未提供磁力链接")
+            return {}
+
+        print(f"\n🔗 连接 qBittorrent ({self._base_url} via {self.ssh_alias})...")
+        self.login()
+        results: dict[str, bool] = {}
+        try:
+            for magnet_uri in magnet_uris:
+                results[magnet_uri] = self.add_magnet(
+                    magnet_uri,
+                    save_path=save_path,
+                    skip_checking=skip_checking,
+                    paused=paused,
+                )
+        finally:
+            self.logout()
+        return results
+
+    def get_torrent_statuses(self, info_hashes: list[str] | None = None,
+                             names: list[str] | None = None) -> list[dict]:
+        """查询远程 qBittorrent 任务状态，可按 info hash 或任务名称过滤。"""
+        hash_filter = {value.lower() for value in (info_hashes or []) if value}
+        name_filter = {value for value in (names or []) if value}
+
+        print(f"\n🔍 查询 qBittorrent 状态 ({self._base_url} via {self.ssh_alias})...")
+        self.login()
+        try:
+            cmd = (
+                f"curl -s -G -b '{self._cookie_remote}' "
+                f"--data-urlencode 'filter=all' "
+                f"--data-urlencode 'sort=name' "
+                f"'{self._base_url}/api/v2/torrents/info'"
+            )
+            result = self._ssh_run(self.ssh_alias, cmd, capture=True)
+            statuses = self._parse_json_response(result.stdout.strip())
+        finally:
+            self.logout()
+
+        if not isinstance(statuses, list):
+            raise SeederError("qBittorrent 状态接口返回的不是任务列表")
+        return [
+            status for status in statuses
+            if (not hash_filter and not name_filter)
+            or status.get("hash", "").lower() in hash_filter
+            or status.get("name") in name_filter
+        ]
 
     def add_torrents(self, remote_dir_or_paths: str | list[str | Path],
                      save_path: str | None = None,
@@ -361,6 +446,23 @@ class RemoteSeeder:
     # ═══════════════════════════════════════════════
     # 工具
     # ═══════════════════════════════════════════════
+
+    @staticmethod
+    def _parse_json_response(raw: str):
+        """从可能含 SSH 横幅的输出中提取 JSON 数组或对象。"""
+        if not raw:
+            raise SeederError("qBittorrent 未返回 JSON 数据")
+        decoder = json.JSONDecoder()
+        for marker in ("[", "{"):
+            start = raw.find(marker)
+            if start < 0:
+                continue
+            try:
+                value, _ = decoder.raw_decode(raw[start:])
+                return value
+            except json.JSONDecodeError:
+                continue
+        raise SeederError(f"无法解析 qBittorrent JSON 响应: {raw}")
 
     @staticmethod
     def _parse_add_response(raw: str) -> bool:

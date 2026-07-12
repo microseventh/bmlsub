@@ -34,7 +34,7 @@ from .transfer import (
 from .publish import Publisher, PublishError
 from .r2upload import R2Uploader, R2UploadError
 from .seeder import RemoteSeeder, SeederError
-from .torrent import TorrentCreator, DEFAULT_TRACKERS
+from .torrent import TorrentCreator, DEFAULT_TRACKERS, TorrentMetadata, read_torrent_metadata
 from .scan import (
     scan_products, check_products, product_path, product_torrent_path,
     PRODUCT_FORMATS,
@@ -85,6 +85,8 @@ __all__ = [
     "Publisher",
     "TorrentCreator",
     "DEFAULT_TRACKERS",
+    "TorrentMetadata",
+    "read_torrent_metadata",
     "scan_products",
     "check_products",
     "product_path",
