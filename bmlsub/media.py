@@ -115,7 +115,8 @@ class MediaExtractor:
 
     # ── 音轨提取 ─────────────────────────────────
 
-    def extract_audio_tracks(self, video_path: Path, progress=None) -> list[ExtractedTrack]:
+    def extract_audio_tracks(self, video_path: Path, progress=None,
+                             output_stem: str | None = None) -> list[ExtractedTrack]:
         """
         提取所有音轨，每个轨道使用唯一文件名:
         {stem}_audio_{lang}_{index}.aac
@@ -123,6 +124,7 @@ class MediaExtractor:
         Parameters
         ----------
         progress : 可选，tqdm 兼容对象（有 .update(n) 方法），用于显示进度
+        output_stem : 输出文件名前缀；不传时默认使用 video_path.stem
         """
         video_path = Path(video_path)
         streams = self._get_non_attachment_streams(video_path)
@@ -132,7 +134,7 @@ class MediaExtractor:
             if s.get("codec_type") != "audio":
                 continue
 
-            track = self._stream_to_track(video_path, s, "audio")
+            track = self._stream_to_track(video_path, s, "audio", output_stem=output_stem)
             if track.output_path.exists():
                 print(f"  ⏭️  跳过已存在: {track.output_path.name}")
                 extracted.append(track)
@@ -155,7 +157,8 @@ class MediaExtractor:
 
     # ── 字幕提取（全量） ─────────────────────────
 
-    def extract_subtitle_tracks(self, video_path: Path) -> list[ExtractedTrack]:
+    def extract_subtitle_tracks(self, video_path: Path,
+                                output_stem: str | None = None) -> list[ExtractedTrack]:
         """
         提取所有字幕轨，转为 ASS 格式:
         {stem}_sub_{lang}_{index}.ass
@@ -168,7 +171,7 @@ class MediaExtractor:
             if s.get("codec_type") != "subtitle":
                 continue
 
-            track = self._stream_to_track(video_path, s, "subtitle")
+            track = self._stream_to_track(video_path, s, "subtitle", output_stem=output_stem)
             if track.output_path.exists():
                 print(f"  ⏭️  跳过已存在: {track.output_path.name}")
                 extracted.append(track)
@@ -188,7 +191,8 @@ class MediaExtractor:
     # ── 智能字幕提取（中/英/日优先） ─────────────
 
     def extract_preferred_subtitles(self, video_path: Path,
-                                     langs: list[str] | None = None
+                                     langs: list[str] | None = None,
+                                     output_stem: str | None = None
                                      ) -> PreferredSubs | None:
         """
         智能字幕筛选提取：
@@ -201,6 +205,7 @@ class MediaExtractor:
         ----------
         video_path : 视频文件路径
         langs : 自定义语言优先级列表，默认 ["chi", "eng", "jpn"]
+        output_stem : 输出文件名前缀；不传时默认使用 video_path.stem
 
         Returns
         -------
@@ -235,7 +240,7 @@ class MediaExtractor:
         if len(non_empty) <= 1 and not buckets["other"]:
             # 只有一种语言 or 完全没有优先级语言
             print(f"  仅一种语言，提取全部 {len(all_sub_info)} 条字幕")
-            extracted = self.extract_subtitle_tracks(video_path)
+            extracted = self.extract_subtitle_tracks(video_path, output_stem=output_stem)
             return self._bundle_preferred(extracted, all_sub_info)
 
         # 多种语言：按优先级提取
@@ -243,8 +248,7 @@ class MediaExtractor:
         streams = self._get_streams_dict(video_path)
         for si in all_sub_info:
             cat = self._classify_lang(si.language)
-            # 如果此类别不在优先级内且其他类别存在，跳过
-            track = self._extract_single_sub(video_path, streams[si.index])
+            track = self._extract_single_sub(video_path, streams[si.index], output_stem=output_stem)
             if cat == "chi":
                 result.chi.append(track)
             elif cat == "eng":
@@ -259,23 +263,26 @@ class MediaExtractor:
 
     # ── 一键提取 ─────────────────────────────────
 
-    def extract_all(self, video_path: Path) -> tuple[list[ExtractedTrack], list[ExtractedTrack]]:
+    def extract_all(self, video_path: Path,
+                    output_stem: str | None = None) -> tuple[list[ExtractedTrack], list[ExtractedTrack]]:
         """返回 (音频列表, 字幕列表)"""
-        audio = self.extract_audio_tracks(video_path)
-        subs = self.extract_subtitle_tracks(video_path)
+        audio = self.extract_audio_tracks(video_path, output_stem=output_stem)
+        subs = self.extract_subtitle_tracks(video_path, output_stem=output_stem)
         return audio, subs
 
-    def extract_smart(self, video_path: Path) -> tuple[list[ExtractedTrack], PreferredSubs | None]:
+    def extract_smart(self, video_path: Path,
+                      output_stem: str | None = None) -> tuple[list[ExtractedTrack], PreferredSubs | None]:
         """返回 (音频列表, 智能筛选字幕结果)"""
-        audio = self.extract_audio_tracks(video_path)
-        subs = self.extract_preferred_subtitles(video_path)
+        audio = self.extract_audio_tracks(video_path, output_stem=output_stem)
+        subs = self.extract_preferred_subtitles(video_path, output_stem=output_stem)
         return audio, subs
 
     # ── 公共辅助 ─────────────────────────────────
 
-    def get_audio_track(self, video_path: Path, index: int = 0) -> Path | None:
+    def get_audio_track(self, video_path: Path, index: int = 0,
+                        output_stem: str | None = None) -> Path | None:
         """获取视频的第 N 条音轨路径（提取后），方便快速引用"""
-        tracks = self.extract_audio_tracks(video_path)
+        tracks = self.extract_audio_tracks(video_path, output_stem=output_stem)
         if index < len(tracks):
             return tracks[index].output_path
         return None
@@ -312,9 +319,10 @@ class MediaExtractor:
             return "jpn"
         return "other"
 
-    def _extract_single_sub(self, video_path: Path, stream: dict) -> ExtractedTrack:
+    def _extract_single_sub(self, video_path: Path, stream: dict,
+                            output_stem: str | None = None) -> ExtractedTrack:
         """提取单条字幕轨"""
-        track = self._stream_to_track(video_path, stream, "subtitle")
+        track = self._stream_to_track(video_path, stream, "subtitle", output_stem=output_stem)
         if track.output_path.exists():
             return track
 
@@ -327,7 +335,8 @@ class MediaExtractor:
         ], check=True, capture_output=True, timeout=300)
         return track
 
-    def _stream_to_track(self, video_path: Path, stream: dict, track_type: str) -> ExtractedTrack:
+    def _stream_to_track(self, video_path: Path, stream: dict, track_type: str,
+                         output_stem: str | None = None) -> ExtractedTrack:
         tags = stream.get("tags", {})
         lang = tags.get("language", "und")
         title = tags.get("title", "")
@@ -341,7 +350,8 @@ class MediaExtractor:
             ext = ".ass"
             prefix = "sub"
 
-        filename = f"{video_path.stem}_{prefix}_{lang}_{idx}{ext}"
+        stem = output_stem or video_path.stem
+        filename = f"{stem}_{prefix}_{lang}_{idx}{ext}"
         output_path = self.work_dir / filename
 
         return ExtractedTrack(
