@@ -1,6 +1,6 @@
 # bml-subpro
 
-`bml-subpro` 是一套面向 **BML 动漫字幕制作 / 转录 / 编码 / 封装 / 上传 / 做种 / 发布** 的 Python 工具库。  
+`bml-subpro` 是一套面向 **BML 动漫字幕制作 / 转录 / 编码 / 封装 / 上传 / 做种 / 发布** 的 Python 工具库。
 它不是偏一次性命令的 CLI，而是更适合在 **Python 脚本、Jupyter Notebook、工作流编排代码** 中按模块组合使用。
 
 包名：`bmlsub`
@@ -44,6 +44,12 @@ cd /Users/miwata/Movies/BML/Project/bml-subpro
 pip install -e ".[all]"
 ```
 
+或者直接使用pip安装：
+
+```base
+pip install git+https://github.com/microseventh/bmlsub.git
+```
+
 ### 2.3 Python 依赖
 
 主要依赖包括：
@@ -60,12 +66,13 @@ pip install -e ".[all]"
 
 ### 2.4 系统依赖
 
-| 工具 | 用途 |
-| --- | --- |
-| `ffmpeg` | 音轨提取、字幕提取、转码、硬压 |
-| `ffprobe` | 媒体流信息探测、元数据检查 |
-| `mkvmerge` | MKV 内封 |
-| `mkvpropedit` | MKV 元数据清理 |
+
+| 工具          | 用途                           |
+| ------------- | ------------------------------ |
+| `ffmpeg`      | 音轨提取、字幕提取、转码、硬压 |
+| `ffprobe`     | 媒体流信息探测、元数据检查     |
+| `mkvmerge`    | MKV 内封                       |
+| `mkvpropedit` | MKV 元数据清理                 |
 
 ---
 
@@ -309,7 +316,7 @@ print(result)
 preset.to_ffmpeg_video_params() -> list[str]
 ```
 
-用途：把预设转换成 ffmpeg 视频参数列表。  
+用途：把预设转换成 ffmpeg 视频参数列表。
 常用于：`Encoder.encode_hevc_vt()`、`Encoder.encode_x264()`。
 
 ### `to_ffmpeg_audio_params()`
@@ -422,7 +429,7 @@ MKV 内封时字幕轨道元数据配置。
 _compose_prefix(group: str, title: str, romaji: str) -> str
 ```
 
-用途：拼装 `[字幕组] 标题 罗马字` 前缀。  
+用途：拼装 `[字幕组] 标题 罗马字` 前缀。
 通常不会直接手调，而由 `ProjectNaming.prefix_chs/prefix_cht` 间接调用。
 
 ---
@@ -659,7 +666,7 @@ EpisodeFiles.discover(
 - `source_video`：显式指定源视频路径；不改 `episode_id`，只改输入定位
 - `chs_subtitle` / `cht_subtitle`：显式指定简繁字幕路径；不要求文件名必须是 `01.*.ass`
 
-用途：统一发现单集相关的所有输入 / 输出路径。  
+用途：统一发现单集相关的所有输入 / 输出路径。
 常作为 `Pipeline.context()` 的底层实现。
 
 ### `_resolve_prefixes(...)`
@@ -965,7 +972,7 @@ Transcriber(
 
 ### `transcribe_direct(audio_path, model=None, output_path=None, force=False)`
 
-用途：整轨一次性转录，适合快速结果。  
+用途：整轨一次性转录，适合快速结果。
 输出命名：`{stem}_direct_{模型简称}.txt`
 
 参数：
@@ -981,7 +988,7 @@ Transcriber(
 
 ### `transcribe_chunked(audio_path, model=None, manual_cuts=None, output_dir=None, force=False)`
 
-用途：切片转录后再合并，精细度更高。  
+用途：切片转录后再合并，精细度更高。
 输出命名：`{stem}_chunked_{模型简称}_final.txt`
 
 参数：
@@ -1128,7 +1135,7 @@ validator.validate_ass_header(ass_path: Path) -> dict[str, str]
 
 ### `standardize_ass(ass_path, output_path=None)`
 
-用途：把字幕头修正到标准格式。  
+用途：把字幕头修正到标准格式。
 如果 `output_path is None`，则原地修改并先备份旧文件。
 
 ### `standardize_extracted_subs(episode_dir, episode_id, source_video=None, chs_subtitle=None, cht_subtitle=None)`
@@ -1137,8 +1144,7 @@ validator.validate_ass_header(ass_path: Path) -> dict[str, str]
 
 ### `convert_chs_to_cht(chs_path, output_path=None, *, converter=None, api_url=None, timeout=None, backup_existing=True)`
 
-用途：调用内置繁化姬 API，把简体字幕转换成繁体字幕。  
-默认使用 `PipelineConfig.subtitle_conversion` 中的设置，即：
+用途：调用内置繁化姬 API，把简体字幕转换成繁体字幕。默认使用 `PipelineConfig.subtitle_conversion` 中的设置，即：
 
 - API：`https://api.zhconvert.org/convert`
 - 转换模式：`Taiwan`
@@ -1290,7 +1296,7 @@ if issues:
 
 ### `package_expected(prefix_chs=None, prefix_cht=None, project=None)`
 
-按照 `EpisodeFiles.expected_products` 的默认命名进行封装。  
+按照 `EpisodeFiles.expected_products` 的默认命名进行封装。
 推荐在新版工作流中优先使用。
 
 ### `package_all(mkv_tmpl, chs_tmpl, cht_tmpl)`
@@ -1374,7 +1380,7 @@ uploader.upload_file(
 
 ### `upload_files(paths, remote_folder='', progress=True)`
 
-批量上传多个文件。  
+批量上传多个文件。
 每个文件的 key 为：`remote_folder + '/' + 文件名`。
 
 ### `list_remote(prefix='')`
