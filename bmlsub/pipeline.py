@@ -1,36 +1,113 @@
 """
-流水线编排 — 高层编排所有模块，每个阶段独立可调用
+流水线编排
 
-典型用法:
-    from bmlsub import Pipeline, PipelineConfig
-    cfg = PipelineConfig(work_dir=".")
-    pipe = Pipeline(cfg)
-    pipe.process_episode(".")
+设计原则：
+- 每一步都可独立执行
+- 每一步都显式检查自己的前置条件
+- 保留 notebook 友好输出，同时返回结构化结果
+- 单集模式与合集模式分层，但共享底层模块
 """
 
+from __future__ import annotations
+
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from ._backup import backup_if_exists
-from .config import PipelineConfig
-from .media import MediaExtractor, ExtractedTrack, PreferredSubs
-from .progress import PipelineTimer
-from .transcribe import Transcriber, TranscriptionError
+from .config import PipelineConfig, ProjectNaming, WorkstationConfig
 from .encode import Encoder
-from .subtitle import SubtitleValidator
+from .episode import EpisodeFiles
+from .media import MediaExtractor
 from .package import Packager, PackagingError
-from .transfer import Transfer, TransferError
-from .publish import Publisher, PublishError
+from .progress import PipelineTimer
+from .publish import Publisher
+from .r2upload import R2Uploader
+from .subtitle import SubtitleValidator
+from .torrent import TorrentCreator
+from .transcribe import Transcriber, TranscriptionError
+
+
+@dataclass
+class StageStatus:
+    name: str
+    ready: bool
+    missing: list[str] = field(default_factory=list)
+    outputs: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    def summary(self) -> dict:
+        return {
+            "name": self.name,
+            "ready": self.ready,
+            "missing": list(self.missing),
+            "outputs": list(self.outputs),
+            "notes": list(self.notes),
+        }
+
+
+@dataclass
+class EpisodeStagePlan:
+    episode_id: str
+    inspect: StageStatus
+    extract_subtitles: StageStatus
+    extract_audio: StageStatus
+    transcribe: StageStatus
+    encode_hevc: StageStatus
+    validate_subtitles: StageStatus
+    package: StageStatus
+
+    def summary(self) -> dict:
+        return {
+            "episode_id": self.episode_id,
+            "inspect": self.inspect.summary(),
+            "extract_subtitles": self.extract_subtitles.summary(),
+            "extract_audio": self.extract_audio.summary(),
+            "transcribe": self.transcribe.summary(),
+            "encode_hevc": self.encode_hevc.summary(),
+            "validate_subtitles": self.validate_subtitles.summary(),
+            "package": self.package.summary(),
+        }
+
+
+@dataclass
+class WorkstationStage0Summary:
+    workstation: dict
+    stage0: StageStatus
+
+    def summary(self) -> dict:
+        payload = dict(self.workstation)
+        payload["stage0"] = self.stage0.summary()
+        return payload
+
+
+@dataclass
+class WorkstationBatchResult:
+    mode: str
+    stage: str
+    ok: bool
+    items: list[dict] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    outputs: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    def summary(self) -> dict:
+        return {
+            "mode": self.mode,
+            "stage": self.stage,
+            "ok": self.ok,
+            "items": list(self.items),
+            "missing": list(self.missing),
+            "outputs": list(self.outputs),
+            "notes": list(self.notes),
+        }
 
 
 class Pipeline:
-    """完整流水线编排器"""
+    """完整流水线编排器。"""
 
     def __init__(self, config: PipelineConfig | None = None, **kwargs):
         self.config = config or PipelineConfig(**kwargs)
         self.work_dir = self.config.work_dir
-
-        # 延迟初始化
         self._extractor: MediaExtractor | None = None
         self._transcriber: Transcriber | None = None
         self._encoder: Encoder | None = None
@@ -63,241 +140,588 @@ class Pipeline:
     @property
     def validator(self) -> SubtitleValidator:
         if self._validator is None:
-            self._validator = SubtitleValidator(self.config.sub_standard)
+            self._validator = SubtitleValidator(self.config.sub_standard, config=self.config)
         return self._validator
 
-    # ═══════════════════════════════════════════════
-    # 阶段 1：素材提取（智能字幕筛选）
-    # ═══════════════════════════════════════════════
+    def context(self,
+                episode_dir: Path | str,
+                episode_id: str | None = None,
+                prefix_chs: str | None = None,
+                prefix_cht: str | None = None,
+                project: ProjectNaming | None = None,
+                source_video: Path | str | None = None,
+                chs_subtitle: Path | str | None = None,
+                cht_subtitle: Path | str | None = None) -> EpisodeFiles:
+        return EpisodeFiles.discover(
+            episode_dir,
+            episode_id,
+            prefix_chs=prefix_chs,
+            prefix_cht=prefix_cht,
+            config=self.config,
+            project=project,
+            source_video=source_video,
+            chs_subtitle=chs_subtitle,
+            cht_subtitle=cht_subtitle,
+        )
+
+    def inspect_episode(self, episode_dir: Path | str,
+                        episode_id: str | None = None,
+                        prefix_chs: str | None = None,
+                        prefix_cht: str | None = None,
+                        project: ProjectNaming | None = None,
+                        source_video: Path | str | None = None,
+                        chs_subtitle: Path | str | None = None,
+                        cht_subtitle: Path | str | None = None) -> dict:
+        return self.context(
+            episode_dir,
+            episode_id,
+            prefix_chs=prefix_chs,
+            prefix_cht=prefix_cht,
+            project=project,
+            source_video=source_video,
+            chs_subtitle=chs_subtitle,
+            cht_subtitle=cht_subtitle,
+        ).summary()
+
+    def plan_episode(self,
+                     episode_dir: Path | str,
+                     episode_id: str | None = None,
+                     prefix_chs: str | None = None,
+                     prefix_cht: str | None = None,
+                     project: ProjectNaming | None = None,
+                     source_video: Path | str | None = None,
+                     chs_subtitle: Path | str | None = None,
+                     cht_subtitle: Path | str | None = None) -> EpisodeStagePlan:
+        ctx = self.context(
+            episode_dir,
+            episode_id,
+            prefix_chs=prefix_chs,
+            prefix_cht=prefix_cht,
+            project=project,
+            source_video=source_video,
+            chs_subtitle=chs_subtitle,
+            cht_subtitle=cht_subtitle,
+        )
+        packager = Packager(
+            ctx.episode_dir,
+            ctx.episode_id,
+            self.config,
+            source_video=source_video,
+            chs_subtitle=chs_subtitle,
+            cht_subtitle=cht_subtitle,
+        )
+        package_plan = packager.build_plan(
+            prefix_chs=prefix_chs,
+            prefix_cht=prefix_cht,
+            project=project,
+        )
+
+        inspect = StageStatus(
+            name="inspect",
+            ready=True,
+            outputs=[ctx.episode_id],
+            notes=["统一资源发现已完成"],
+        )
+        extract_subtitles = StageStatus(
+            name="extract_subtitles",
+            ready=ctx.pure_mkv is not None,
+            missing=[] if ctx.pure_mkv else [str(ctx.source_video_path or (ctx.episode_dir / f'{ctx.episode_id}.mkv'))],
+            outputs=[str(path) for path in ctx.extracted_subtitles],
+        )
+        extract_audio = StageStatus(
+            name="extract_audio",
+            ready=ctx.pure_mkv is not None,
+            missing=[] if ctx.pure_mkv else [str(ctx.source_video_path or (ctx.episode_dir / f'{ctx.episode_id}.mkv'))],
+            outputs=[str(path) for path in ctx.extracted_audio],
+        )
+        transcribe = StageStatus(
+            name="transcribe",
+            ready=bool(ctx.extracted_audio),
+            missing=[] if ctx.extracted_audio else [f"{ctx.episode_id}_audio_*.aac"],
+            outputs=[str(path) for path in ctx.extracted_audio],
+            notes=["依赖先提取音轨"] if not ctx.extracted_audio else [],
+        )
+        encode_hevc = StageStatus(
+            name="encode_hevc",
+            ready=ctx.pure_mkv is not None,
+            missing=[] if ctx.pure_mkv else [str(ctx.source_video_path or (ctx.episode_dir / f'{ctx.episode_id}.mkv'))],
+            outputs=[str(ctx.hevc_mkv)] if ctx.hevc_mkv else [],
+        )
+        validate_subtitles = StageStatus(
+            name="validate_subtitles",
+            ready=bool(ctx.all_subs),
+            missing=[] if ctx.all_subs else [f"{ctx.episode_id}.chs&jpn.ass / {ctx.episode_id}.cht&jpn.ass"],
+            outputs=[str(path) for path in ctx.all_subs],
+        )
+        package = StageStatus(
+            name="package",
+            ready=package_plan.has_mp4_inputs or package_plan.has_mkv_inputs,
+            missing=sorted(set(package_plan.missing_for_mp4 + package_plan.missing_for_mkv)),
+            outputs=[
+                str(path) for path in (
+                    package_plan.mp4_chs_output,
+                    package_plan.mp4_cht_output,
+                    package_plan.mkv_output,
+                ) if path is not None
+            ],
+            notes=[
+                "MP4 硬压与 MKV 内封是独立子步骤",
+                "整体顺序建议参考 workstation.ipynb：先提取/校验，再编码/封装",
+            ],
+        )
+        return EpisodeStagePlan(
+            episode_id=ctx.episode_id,
+            inspect=inspect,
+            extract_subtitles=extract_subtitles,
+            extract_audio=extract_audio,
+            transcribe=transcribe,
+            encode_hevc=encode_hevc,
+            validate_subtitles=validate_subtitles,
+            package=package,
+        )
+
+    def build_workstation(self,
+                          root_dir: Path | str,
+                          episode_ids: list[str] | str | None = None,
+                          **kwargs) -> WorkstationConfig:
+        return WorkstationConfig(root_dir=Path(root_dir), episode_ids=episode_ids or [], **kwargs)
+
+    def inspect_workstation(self, workstation: WorkstationConfig | Path | str, **kwargs) -> WorkstationStage0Summary:
+        ws = self._normalize_workstation(workstation, **kwargs)
+        checks = ws.stage0_checks()
+        missing_parts: list[str] = []
+        summary = ws.missing_summary()
+        if summary["source"]:
+            missing_parts.append(f"缺少源视频: {', '.join(summary['source'])}")
+        if summary["chs_sub"]:
+            missing_parts.append(f"缺少简日字幕: {', '.join(summary['chs_sub'])}")
+        if summary["cht_sub"]:
+            missing_parts.append(f"缺少繁日字幕: {', '.join(summary['cht_sub'])}")
+
+        stage0 = StageStatus(
+            name="stage0",
+            ready=not missing_parts,
+            missing=missing_parts,
+            outputs=[str(ws.raw_dir), str(ws.sub_dir), str(ws.sub_tj_dir)],
+            notes=[
+                f"共检查 {len(checks)} 集",
+                "合集模式阶段 0 用于统一项目参数、目录布局与前置条件检查",
+            ],
+        )
+        return WorkstationStage0Summary(workstation=ws.summary(), stage0=stage0)
+
+    def plan_workstation(self, workstation: WorkstationConfig | Path | str, **kwargs) -> WorkstationBatchResult:
+        ws = self._normalize_workstation(workstation, **kwargs)
+        items: list[dict] = []
+        outputs: list[str] = []
+        missing: list[str] = []
+
+        for ep_id in ws.effective_episode_ids:
+            episode_dir = self._single_episode_dir(ws, ep_id)
+            plan = self.plan_episode(
+                episode_dir,
+                episode_id=ep_id,
+                prefix_chs=ws.prefix_chs,
+                prefix_cht=ws.prefix_cht,
+            )
+            plan_summary = plan.summary()
+            items.append(plan_summary)
+            outputs.extend(stage["name"] for key, stage in plan_summary.items() if isinstance(stage, dict) and stage["ready"])
+            for key, stage in plan_summary.items():
+                if isinstance(stage, dict) and stage["missing"]:
+                    for value in stage["missing"]:
+                        marker = f"EP{ep_id}:{key}:{value}"
+                        if marker not in missing:
+                            missing.append(marker)
+
+        return WorkstationBatchResult(
+            mode="collection",
+            stage="plan",
+            ok=not missing,
+            items=items,
+            missing=missing,
+            outputs=outputs,
+            notes=["合集模式计划按集汇总单集阶段 readiness"],
+        )
+
+    def extract_subtitles(self,
+                          episode_dir: Path | str,
+                          episode_id: str,
+                          smart: bool = False,
+                          source_video: Path | str | None = None,
+                          chs_subtitle: Path | str | None = None,
+                          cht_subtitle: Path | str | None = None) -> dict:
+        ctx = EpisodeFiles.discover(
+            episode_dir,
+            episode_id,
+            config=self.config,
+            source_video=source_video,
+            chs_subtitle=chs_subtitle,
+            cht_subtitle=cht_subtitle,
+        )
+        if not ctx.pure_mkv:
+            missing_source = str(ctx.source_video_path or (ctx.episode_dir / f'{episode_id}.mkv'))
+            return {"ok": False, "missing": [missing_source], "tracks": []}
+
+        if smart:
+            subs = MediaExtractor(ctx.episode_dir).extract_preferred_subtitles(
+                ctx.pure_mkv,
+                langs=self.config.subtitle_strategy.preferred,
+                output_stem=episode_id,
+            )
+            tracks = subs.all_tracks() if subs else []
+        else:
+            tracks = MediaExtractor(ctx.episode_dir).extract_subtitle_tracks(
+                ctx.pure_mkv,
+                output_stem=episode_id,
+            )
+
+        return {
+            "ok": True,
+            "missing": [],
+            "tracks": [str(track.output_path) for track in tracks],
+        }
+
+    def extract_audio(self, episode_dir: Path | str, episode_id: str,
+                      source_video: Path | str | None = None,
+                      chs_subtitle: Path | str | None = None,
+                      cht_subtitle: Path | str | None = None) -> dict:
+        ctx = EpisodeFiles.discover(
+            episode_dir,
+            episode_id,
+            config=self.config,
+            source_video=source_video,
+            chs_subtitle=chs_subtitle,
+            cht_subtitle=cht_subtitle,
+        )
+        if not ctx.pure_mkv:
+            missing_source = str(ctx.source_video_path or (ctx.episode_dir / f'{episode_id}.mkv'))
+            return {"ok": False, "missing": [missing_source], "tracks": []}
+
+        tracks = MediaExtractor(ctx.episode_dir).extract_audio_tracks(ctx.pure_mkv, output_stem=episode_id)
+        return {
+            "ok": True,
+            "missing": [],
+            "tracks": [str(track.output_path) for track in tracks],
+        }
 
     def extract_media(self, episode_dir: Path | str | None = None,
-                       episodes: list[str] | None = None,
-                       smart_subs: bool = True) -> dict[str, dict]:
-        """
-        提取指定集数的音轨和字幕
-
-        Parameters
-        ----------
-        episode_dir : 集数目录
-        episodes : 集数列表 ["01", "02"]，None=自动查找
-        smart_subs : True=智能筛选（中/英/日优先），False=全部提取
-
-        Returns
-        -------
-        {"01": {"audio": [...], "subs": PreferredSubs|list, "subs_ok": bool}}
-        """
-        d = Path(episode_dir) if episode_dir else self.work_dir
-        extractor = MediaExtractor(d)
-
+                      episodes: list[str] | None = None,
+                      smart_subs: bool = True) -> dict[str, dict]:
+        directory = Path(episode_dir) if episode_dir else self.work_dir
+        extractor = MediaExtractor(directory)
         if episodes:
-            targets = [d / f"{ep}.mkv" for ep in episodes if (d / f"{ep}.mkv").exists()]
+            targets = [directory / f"{ep}.mkv" for ep in episodes if (directory / f"{ep}.mkv").exists()]
         else:
             targets = extractor.find_digit_mkvs()
 
         results: dict[str, dict] = {}
-        for t in targets:
-            print(f"\n>>> 提取: {t.name}")
-            audio = extractor.extract_audio_tracks(t)
-
+        for target in targets:
+            print(f"\n>>> 提取: {target.name}")
+            audio = extractor.extract_audio_tracks(target)
             if smart_subs:
-                subs = extractor.extract_preferred_subtitles(t)
+                subs = extractor.extract_preferred_subtitles(target, langs=self.config.subtitle_strategy.preferred)
+                sub_tracks = subs.all_tracks() if subs else []
                 subs_ok = subs is not None and subs.has_any
                 if subs is None:
-                    print(f"⚠️  [{t.stem}] 无字幕轨道！后续封装将需要外部字幕文件")
+                    print(f"⚠️  [{target.stem}] 无字幕轨道！后续封装将需要外部字幕文件")
             else:
-                subs = extractor.extract_subtitle_tracks(t)
-                subs_ok = len(subs) > 0
-
-            results[t.stem] = {"audio": audio, "subs": subs, "subs_ok": subs_ok}
+                sub_tracks = extractor.extract_subtitle_tracks(target)
+                subs_ok = len(sub_tracks) > 0
+            results[target.stem] = {
+                "audio": audio,
+                "subs": sub_tracks,
+                "subs_ok": subs_ok,
+            }
         return results
 
-    # ═══════════════════════════════════════════════
-    # 阶段 2：AI 转录（两种方法）
-    # ═══════════════════════════════════════════════
+    def validate_workstation_subtitles(self, workstation: WorkstationConfig | Path | str, **kwargs) -> WorkstationBatchResult:
+        ws = self._normalize_workstation(workstation, **kwargs)
+        items: list[dict] = []
+        outputs: list[str] = []
+        missing: list[str] = []
+
+        for ep_id in ws.effective_episode_ids:
+            result = self.validate_subtitles(self._single_episode_dir(ws, ep_id), ep_id)
+            items.append({"episode_id": ep_id, **result})
+            outputs.extend(result.get("standardized", []))
+            missing.extend([f"EP{ep_id}:{name}" for name in result.get("missing", [])])
+
+        return WorkstationBatchResult(
+            mode="collection",
+            stage="validate_subtitles",
+            ok=not missing,
+            items=items,
+            missing=missing,
+            outputs=outputs,
+            notes=["合集模式按集复用单集字幕校验逻辑"],
+        )
+
+    def encode_workstation_hevc(self, workstation: WorkstationConfig | Path | str, **kwargs) -> WorkstationBatchResult:
+        ws = self._normalize_workstation(workstation, **kwargs)
+        items: list[dict] = []
+        outputs: list[str] = []
+        missing: list[str] = []
+
+        for ep_id in ws.effective_episode_ids:
+            src = ws.source_video(ep_id)
+            dst = ws.hevc_path(ep_id)
+            if not src.exists():
+                marker = f"EP{ep_id}:{src.name}"
+                missing.append(marker)
+                items.append({"episode_id": ep_id, "ok": False, "missing": [str(src)], "output": str(dst)})
+                continue
+            items.append({"episode_id": ep_id, "ok": True, "input": str(src), "output": str(dst)})
+            outputs.append(str(dst))
+
+        return WorkstationBatchResult(
+            mode="collection",
+            stage="encode_hevc",
+            ok=not missing,
+            items=items,
+            missing=missing,
+            outputs=outputs,
+            notes=["合集模式阶段 3 以项目级目录布局推导 HEVC 输出路径"],
+        )
+
+    def build_release_batch(self, workstation: WorkstationConfig | Path | str, **kwargs) -> WorkstationBatchResult:
+        ws = self._normalize_workstation(workstation, **kwargs)
+        creator = TorrentCreator()
+        items: list[dict] = []
+        outputs: list[str] = []
+        missing: list[str] = []
+
+        for label, kind in (("HEVC", "hevc"), ("简日", "chs"), ("繁日", "cht")):
+            pack_dir = ws.release_pack_dir(kind)
+            torrent_path = ws.release_torrent_path(kind)
+            exists = pack_dir.exists() and any(pack_dir.rglob("*"))
+            item = {
+                "label": label,
+                "kind": kind,
+                "pack_dir": str(pack_dir),
+                "torrent_path": str(torrent_path),
+                "ready": exists,
+            }
+            if exists:
+                try:
+                    item["plan"] = creator.build_plan(pack_dir, dst=torrent_path, v1_only=True).summary()
+                except FileNotFoundError:
+                    item["ready"] = False
+            if item["ready"]:
+                outputs.append(str(torrent_path))
+            else:
+                missing.append(f"{label}:{pack_dir}")
+            items.append(item)
+
+        return WorkstationBatchResult(
+            mode="collection",
+            stage="torrent_release_dirs",
+            ok=not missing,
+            items=items,
+            missing=missing,
+            outputs=outputs,
+            notes=["合集模式按发布文件夹整体生成种子，而非逐集生成"],
+        )
 
     def transcribe_episode(self, episode_dir: Path | str,
-                            episode_id: str,
-                            direct_model: str | None = None,
-                            chunked_model: str | None = None,
-                            manual_cuts: list[str] | None = None) -> dict:
-        """
-        对单集执行转录
-
-        Parameters
-        ----------
-        direct_model : 直接转录用的模型，None=默认 fast_model
-        chunked_model : 分割转录用的模型，None=默认 detailed_model
-        manual_cuts : 手动切点列表
-
-        Returns
-        -------
-        {"direct": Path|None, "chunked": Path|None}
-        """
-        d = Path(episode_dir)
-        audio_files = sorted(d.glob(f"{episode_id}_audio_*.aac"))
-        if not audio_files:
-            audio_files = sorted(d.glob(f"{episode_id}_audiotracker*.aac"))
-
+                           episode_id: str,
+                           direct_model: str | None = None,
+                           chunked_model: str | None = None,
+                           manual_cuts: list[str] | None = None,
+                           source_video: Path | str | None = None,
+                           chs_subtitle: Path | str | None = None,
+                           cht_subtitle: Path | str | None = None) -> dict:
+        directory = Path(episode_dir)
+        ctx = EpisodeFiles.discover(
+            directory,
+            episode_id,
+            config=self.config,
+            source_video=source_video,
+            chs_subtitle=chs_subtitle,
+            cht_subtitle=cht_subtitle,
+        )
+        audio_files = ctx.extracted_audio or sorted(directory.glob(f"{episode_id}_audiotracker*.aac"))
         if not audio_files:
             print(f"⚠️ 找不到 EP{episode_id} 的音轨文件")
-            return {"direct": None, "chunked": None}
+            return {"ok": False, "missing": [f"{episode_id}_audio_*.aac"], "direct": None, "chunked": None}
 
         audio = audio_files[0]
-
-        # 方法1: 直接转录
         direct = None
         try:
-            direct = self.transcriber.transcribe_direct(
-                audio, model=direct_model or self.config.whisper_fast_model)
+            direct = self.transcriber.transcribe_direct(audio, model=direct_model or self.config.whisper_fast_model)
         except TranscriptionError as e:
             print(f"⚠️ 直接转录失败: {e}")
 
-        # 方法2: 分割转录
         chunked = None
         try:
             chunked = self.transcriber.transcribe_chunked(
-                audio, model=chunked_model or self.config.whisper_detailed_model,
-                manual_cuts=manual_cuts)
+                audio,
+                model=chunked_model or self.config.whisper_detailed_model,
+                manual_cuts=manual_cuts,
+            )
         except TranscriptionError as e:
             print(f"⚠️ 分割转录失败: {e}")
 
-        return {"direct": direct, "chunked": chunked}
+        return {
+            "ok": direct is not None or chunked is not None,
+            "missing": [],
+            "direct": direct,
+            "chunked": chunked,
+        }
 
-    # ═══════════════════════════════════════════════
-    # 阶段 3：HEVC 编码
-    # ═══════════════════════════════════════════════
+    def encode_episode(self, episode_dir: Path | str, episode_id: str,
+                       source_video: Path | str | None = None,
+                       chs_subtitle: Path | str | None = None,
+                       cht_subtitle: Path | str | None = None) -> Path:
+        ctx = EpisodeFiles.discover(
+            episode_dir,
+            episode_id,
+            config=self.config,
+            source_video=source_video,
+            chs_subtitle=chs_subtitle,
+            cht_subtitle=cht_subtitle,
+        )
+        if not ctx.pure_mkv:
+            raise FileNotFoundError(f"源文件不存在: {ctx.source_video_path or (Path(episode_dir) / f'{episode_id}.mkv')}")
+        target = ctx.episode_dir / f"{episode_id}_HEVC10bit.mkv"
+        return self.encoder.encode_hevc_vt(ctx.pure_mkv, dst=target)
 
-    def encode_episode(self, episode_dir: Path | str,
-                        episode_id: str) -> Path:
-        """单集 HEVC VideoToolbox 硬件编码"""
-        d = Path(episode_dir)
-        src = d / f"{episode_id}.mkv"
-        if not src.exists():
-            raise FileNotFoundError(f"源文件不存在: {src}")
-        return self.encoder.encode_hevc_vt(src)
-
-    def encode_hevc_batch(self, episode_dir: Path | str,
-                           episodes: list[str] | None = None) -> list[Path]:
-        """批量 HEVC 编码"""
-        d = Path(episode_dir)
-        extractor = MediaExtractor(d)
-        targets = [d / f"{ep}.mkv" for ep in episodes] if episodes \
-                   else [p for p in extractor.find_digit_mkvs()
-                         if re.match(r'^\d+$', p.stem)]
-        return [self.encoder.encode_hevc_vt(t) for t in targets]
-
-    # ═══════════════════════════════════════════════
-    # 阶段 4：字幕校验与标准化
-    # ═══════════════════════════════════════════════
-
-    def validate_subtitles(self, episode_dir: Path | str,
-                            episode_id: str) -> dict:
-        """单集字幕校验 + ASS 头标准化（对所有匹配到的字幕文件）"""
-        d = Path(episode_dir)
-        pkg = Packager(d, episode_id, self.config)
-        files = pkg.get_available_files()
+    def validate_subtitles(self, episode_dir: Path | str, episode_id: str,
+                           source_video: Path | str | None = None,
+                           chs_subtitle: Path | str | None = None,
+                           cht_subtitle: Path | str | None = None,
+                           ensure_cht: bool = False,
+                           converter: str | None = None,
+                           api_url: str | None = None,
+                           timeout: int | None = None,
+                           regenerate_cht: bool | None = None) -> dict:
+        ctx = EpisodeFiles.discover(
+            episode_dir,
+            episode_id,
+            config=self.config,
+            source_video=source_video,
+            chs_subtitle=chs_subtitle,
+            cht_subtitle=cht_subtitle,
+        )
+        if ensure_cht:
+            ensure_result = self.validator.ensure_episode_subtitles(
+                episode_dir,
+                episode_id,
+                source_video=source_video,
+                chs_subtitle=chs_subtitle,
+                cht_subtitle=cht_subtitle,
+                converter=converter,
+                api_url=api_url,
+                timeout=timeout,
+                regenerate_cht=regenerate_cht,
+                standardize=True,
+            )
+            return {
+                "all_ok": ensure_result["all_ok"],
+                "standardized": [path.name for path in ensure_result["standardized"]],
+                "missing": list(ensure_result["missing"]),
+                "generated_cht": str(ensure_result["generated_cht"]) if ensure_result["generated_cht"] else None,
+                "backed_up": [str(path) for path in ensure_result["backed_up"]],
+                "validated": [str(path) for path in ensure_result["validated"]],
+            }
 
         result = {"all_ok": True, "standardized": [], "missing": []}
-
-        for sub_path in files["all_subs"]:
+        for sub_path in ctx.all_subs:
             violations = self.validator.validate_ass_header(sub_path)
             if violations:
                 print(f"📝 标准化 {sub_path.name}: {list(violations.keys())}")
                 self.validator.standardize_ass(sub_path)
                 result["standardized"].append(sub_path.name)
 
-        if not files["all_subs"]:
+        if not ctx.all_subs:
             result["all_ok"] = False
-            result["missing"] = [f"{episode_id}.chs&jpn.ass", f"{episode_id}.cht&jpn.ass"]
-            print(f"⚠️  未找到字幕文件！后续封装将需要:")
-            for m in result["missing"]:
-                print(f"    - {m}")
+            missing_labels = []
+            if chs_subtitle is not None:
+                missing_labels.append(str(Path(chs_subtitle)))
+            else:
+                missing_labels.append(f"{episode_id}.chs&jpn.ass")
+            if cht_subtitle is not None:
+                missing_labels.append(str(Path(cht_subtitle)))
+            else:
+                missing_labels.append(f"{episode_id}.cht&jpn.ass")
+            result["missing"] = missing_labels
+            print("⚠️  未找到字幕文件！后续封装将需要:")
+            for missing in result["missing"]:
+                print(f"    - {missing}")
 
         return result
 
-    # ═══════════════════════════════════════════════
-    # 阶段 5：封装（自动匹配字幕）
-    # ═══════════════════════════════════════════════
-
     def package_episode(self, episode_dir: Path | str, episode_id: str,
-                         mkv_template: str, chs_template: str,
-                         cht_template: str) -> list[Path]:
-        """
-        mkvmerge 封装 + ffmpeg 硬压（自动匹配字幕文件）
-        """
-        d = Path(episode_dir)
-        packager = Packager(d, episode_id, self.config)
-
-        # 先检查字幕
-        files = packager.get_available_files()
-        if not files["all_subs"]:
-            raise PackagingError(
-                f"EP{episode_id}: 未找到任何字幕文件！"
-                f"请提供 {episode_id}.chs&jpn.ass 或 {episode_id}.cht&jpn.ass"
-            )
-
+                        mkv_template: str | None = None,
+                        chs_template: str | None = None,
+                        cht_template: str | None = None,
+                        prefix_chs: str | None = None,
+                        prefix_cht: str | None = None,
+                        project: ProjectNaming | None = None,
+                        source_video: Path | str | None = None,
+                        chs_subtitle: Path | str | None = None,
+                        cht_subtitle: Path | str | None = None) -> list[Path]:
+        packager = Packager(
+            episode_dir,
+            episode_id,
+            self.config,
+            source_video=source_video,
+            chs_subtitle=chs_subtitle,
+            cht_subtitle=cht_subtitle,
+        )
+        if not all([mkv_template, chs_template, cht_template]):
+            return packager.package_expected(prefix_chs=prefix_chs, prefix_cht=prefix_cht, project=project)
         return packager.package_all(mkv_template, chs_template, cht_template)
 
-    # ═══════════════════════════════════════════════
-    # 阶段 6+7：传输 + 发布
-    # ═══════════════════════════════════════════════
+    def upload_files_to_r2(self, file_paths: list[str | Path], remote_folder: str = "",
+                           uploader: R2Uploader | None = None, **r2_kwargs) -> dict:
+        uploader = uploader or R2Uploader(**r2_kwargs)
+        uploaded_keys = uploader.upload_files(file_paths, remote_folder=remote_folder)
+        return {
+            "bucket_name": uploader.bucket_name,
+            "remote_folder": remote_folder.strip("/"),
+            "uploaded_keys": uploaded_keys,
+        }
 
-    def transfer_files(self, file_paths: list[str | Path],
-                        ssh_config: dict,
-                        remote_dir: str = "/opt/qb/downloads") -> bool:
-        """croc + SSH 安全传输"""
-        transfer = Transfer(ssh_config, remote_dir)
-        return transfer.send_files(file_paths)
-
-    def seed_torrents(self, files: list[Path],
-                       qb_host: str,
-                       qb_user: str = "admin",
-                       qb_pass: str = "",
-                       download_base: str = "/downloads") -> dict[str, bool]:
-        """qBittorrent 做种"""
+    def seed_torrents(self, files: list[Path], qb_host: str,
+                      qb_user: str = "admin", qb_pass: str = "",
+                      download_base: str = "/downloads") -> dict[str, bool]:
         return Publisher.seed_qbittorrent(
-            host=qb_host, files=files,
+            host=qb_host,
+            files=files,
             download_base=download_base,
-            username=qb_user, password=qb_pass,
+            username=qb_user,
+            password=qb_pass,
         )
 
-    # ═══════════════════════════════════════════════
-    # 一键全流程
-    # ═══════════════════════════════════════════════
-
     def process_episode(self, episode_dir: Path | str,
-                         episode_id: str | None = None,
-                         manual_cuts: dict | None = None,
-                         direct_model: str | None = None,
-                         chunked_model: str | None = None,
-                         mkv_template: str | None = None,
-                         chs_template: str | None = None,
-                         cht_template: str | None = None,
-                         ssh_config: dict | None = None,
-                         remote_dir: str = "/opt/qb/downloads",
-                         qb_host: str | None = None,
-                         skip_transcribe: bool = False,
-                         skip_encode: bool = False,
-                         skip_package: bool = False,
-                         skip_transfer: bool = False,
-                         skip_seed: bool = False,
-                         ) -> dict:
-        """
-        单集全流程处理
-
-        Parameters
-        ----------
-        episode_dir : 集数所在目录
-        episode_id : 集数编号，None=自动推断
-        manual_cuts : {"01": ["10:00", "20:00"]} 手动切点
-        direct_model : 直接转录模型，None=默认
-        chunked_model : 分割转录模型，None=默认
-        """
-        d = Path(episode_dir)
+                        episode_id: str | None = None,
+                        manual_cuts: dict | None = None,
+                        direct_model: str | None = None,
+                        chunked_model: str | None = None,
+                        mkv_template: str | None = None,
+                        chs_template: str | None = None,
+                        cht_template: str | None = None,
+                        prefix_chs: str | None = None,
+                        prefix_cht: str | None = None,
+                        project: ProjectNaming | None = None,
+                        source_video: Path | str | None = None,
+                        chs_subtitle: Path | str | None = None,
+                        cht_subtitle: Path | str | None = None,
+                        r2_prefix: str | None = None,
+                        r2_uploader: R2Uploader | None = None,
+                        qb_host: str | None = None,
+                        skip_transcribe: bool = False,
+                        skip_encode: bool = False,
+                        skip_package: bool = False,
+                        skip_upload: bool = False,
+                        skip_seed: bool = False) -> dict:
+        directory = Path(episode_dir)
         if episode_id is None:
-            mkvs = list(d.glob("*.mkv"))
-            digits = [m.stem for m in mkvs
-                      if re.match(r'^\d+$', m.stem) and "_HEVC10bit" not in m.stem]
+            if source_video is not None:
+                raise ValueError("传入 source_video 时必须显式指定 episode_id")
+            mkvs = list(directory.glob("*.mkv"))
+            digits = [m.stem for m in mkvs if re.match(r"^\d+$", m.stem) and "_HEVC10bit" not in m.stem]
             episode_id = digits[0] if digits else None
             if not episode_id:
                 raise ValueError("无法推断 episode_id，请显式指定")
@@ -306,85 +730,125 @@ class Pipeline:
         result: dict = {"episode_id": episode_id, "stages": {}}
         timer = PipelineTimer(f"EP{episode_id}")
 
-        # ── 1. 提取（智能字幕筛选） ──
-        print(f"\n{'='*50}\n📦 阶段 1: 素材提取 EP{episode_id}\n{'='*50}")
+        print(f"\n{'=' * 50}\n📦 阶段 1: 素材提取 EP{episode_id}\n{'=' * 50}")
         with timer.stage("1.素材提取"):
-            extractor = MediaExtractor(d)
-            src = d / f"{episode_id}.mkv"
-            audio = extractor.extract_audio_tracks(src)
-            subs = extractor.extract_preferred_subtitles(src)
-
-            result["stages"]["extract"] = {
-                "audio_count": len(audio),
-                "subs_summary": subs.summary() if subs else "无字幕",
-                "subs_ok": subs is not None and subs.has_any,
+            extract_result = {
+                "audio": self.extract_audio(
+                    directory,
+                    episode_id,
+                    source_video=source_video,
+                    chs_subtitle=chs_subtitle,
+                    cht_subtitle=cht_subtitle,
+                ),
+                "subtitles": self.extract_subtitles(
+                    directory,
+                    episode_id,
+                    smart=True,
+                    source_video=source_video,
+                    chs_subtitle=chs_subtitle,
+                    cht_subtitle=cht_subtitle,
+                ),
             }
-            if subs is None:
-                print(f"⚠️  [{episode_id}] 此集无内封字幕！后续封装请准备外部字幕文件")
-            elif not subs.has_any:
-                print(f"⚠️  [{episode_id}] 字幕提取为空！")
+            result["stages"]["extract"] = extract_result
 
-        # ── 2. 转录（两种方法） ──
         if not skip_transcribe:
-            print(f"\n{'='*50}\n🎙️  阶段 2: AI 转录 EP{episode_id}\n{'='*50}")
+            print(f"\n{'=' * 50}\n🎙️  阶段 2: AI 转录 EP{episode_id}\n{'=' * 50}")
             with timer.stage("2.AI转录"):
                 transcribe_result = self.transcribe_episode(
-                    d, episode_id,
+                    directory,
+                    episode_id,
                     direct_model=direct_model,
                     chunked_model=chunked_model,
                     manual_cuts=cuts,
+                    source_video=source_video,
+                    chs_subtitle=chs_subtitle,
+                    cht_subtitle=cht_subtitle,
                 )
                 result["stages"]["transcribe"] = {
-                    k: str(v) if v else None for k, v in transcribe_result.items()
+                    "ok": transcribe_result["ok"],
+                    "direct": str(transcribe_result["direct"]) if transcribe_result["direct"] else None,
+                    "chunked": str(transcribe_result["chunked"]) if transcribe_result["chunked"] else None,
                 }
         else:
             result["stages"]["transcribe"] = "skipped"
 
-        # ── 3. HEVC 编码 ──
         if not skip_encode:
-            print(f"\n{'='*50}\n🎬 阶段 3: HEVC 编码 EP{episode_id}\n{'='*50}")
+            print(f"\n{'=' * 50}\n🎬 阶段 3: HEVC 编码 EP{episode_id}\n{'=' * 50}")
             with timer.stage("3.HEVC编码"):
-                hevc_path = self.encode_episode(d, episode_id)
+                hevc_path = self.encode_episode(
+                    directory,
+                    episode_id,
+                    source_video=source_video,
+                    chs_subtitle=chs_subtitle,
+                    cht_subtitle=cht_subtitle,
+                )
                 result["stages"]["encode"] = str(hevc_path)
         else:
             result["stages"]["encode"] = "skipped"
 
-        # ── 4. 字幕校验 ──
-        print(f"\n{'='*50}\n📝 阶段 4: 字幕校验 EP{episode_id}\n{'='*50}")
+        print(f"\n{'=' * 50}\n📝 阶段 4: 字幕校验 EP{episode_id}\n{'=' * 50}")
         with timer.stage("4.字幕校验"):
-            sub_status = self.validate_subtitles(d, episode_id)
-            result["stages"]["subtitles"] = sub_status
+            result["stages"]["subtitles"] = self.validate_subtitles(
+                directory,
+                episode_id,
+                source_video=source_video,
+                chs_subtitle=chs_subtitle,
+                cht_subtitle=cht_subtitle,
+            )
 
-        # ── 5. 封装 ──
-        if not skip_package and mkv_template:
-            print(f"\n{'='*50}\n📦 阶段 5: 封装 EP{episode_id}\n{'='*50}")
-            pkg = Packager(d, episode_id, self.config)
+        if not skip_package:
+            print(f"\n{'=' * 50}\n📦 阶段 5: 封装 EP{episode_id}\n{'=' * 50}")
             with timer.stage("5.封装"):
                 try:
-                    pkg_files = pkg.package_all(mkv_template,
-                        chs_template or mkv_template.replace(".mkv", ".mp4"),
-                        cht_template or mkv_template.replace(".mkv", ".mp4"))
-                    result["stages"]["package"] = [str(f) for f in pkg_files]
+                    pkg_files = self.package_episode(
+                        directory,
+                        episode_id,
+                        mkv_template=mkv_template,
+                        chs_template=chs_template,
+                        cht_template=cht_template,
+                        prefix_chs=prefix_chs,
+                        prefix_cht=prefix_cht,
+                        project=project,
+                        source_video=source_video,
+                        chs_subtitle=chs_subtitle,
+                        cht_subtitle=cht_subtitle,
+                    )
+                    result["stages"]["package"] = [str(path) for path in pkg_files]
                 except PackagingError as e:
                     result["stages"]["package"] = f"FAILED: {e}"
                     print(f"❌ 封装失败: {e}")
 
-        # ── 6. 传输 ──
-        if not skip_transfer and ssh_config:
+        if not skip_upload:
             pkg_files = result["stages"].get("package", [])
+            upload_prefix = r2_prefix if r2_prefix is not None else getattr(self.config, "r2_prefix", "")
             if isinstance(pkg_files, list) and pkg_files:
-                print(f"\n{'='*50}\n📡 阶段 6: 传输 EP{episode_id}\n{'='*50}")
-                with timer.stage("6.传输"):
-                    self.transfer_files([Path(f) for f in pkg_files], ssh_config, remote_dir)
+                print(f"\n{'=' * 50}\n☁️  阶段 6: R2 上传 EP{episode_id}\n{'=' * 50}")
+                with timer.stage("6.R2上传"):
+                    upload_result = self.upload_files_to_r2(
+                        [Path(path) for path in pkg_files],
+                        remote_folder=upload_prefix,
+                        uploader=r2_uploader,
+                    )
+                    result["stages"]["upload"] = upload_result
 
-        # ── 7. 做种 ──
         if not skip_seed and qb_host:
             pkg_files = result["stages"].get("package", [])
             if isinstance(pkg_files, list) and pkg_files:
-                print(f"\n{'='*50}\n🌐 阶段 7: 做种 EP{episode_id}\n{'='*50}")
+                print(f"\n{'=' * 50}\n🌐 阶段 7: 做种 EP{episode_id}\n{'=' * 50}")
                 with timer.stage("7.做种"):
-                    self.seed_torrents([Path(f) for f in pkg_files], qb_host)
+                    result["stages"]["seed"] = self.seed_torrents([Path(path) for path in pkg_files], qb_host)
 
         print(f"\n✨ EP{episode_id} 全流程完成")
         timer.summary()
         return result
+
+    @staticmethod
+    def _single_episode_dir(workstation: WorkstationConfig, episode_id: str) -> Path:
+        candidate = workstation.root_dir / episode_id
+        return candidate if candidate.is_dir() else workstation.raw_dir
+
+    @staticmethod
+    def _normalize_workstation(workstation: WorkstationConfig | Path | str, **kwargs) -> WorkstationConfig:
+        if isinstance(workstation, WorkstationConfig):
+            return workstation
+        return WorkstationConfig(root_dir=Path(workstation), **kwargs)

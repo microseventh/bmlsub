@@ -1,1780 +1,2435 @@
-# bmlsub — BML 动漫字幕制作与发布流水线
+# bml-subpro
 
-bmlsub 是 **Billion Meta Lab (BML)** 的动漫字幕制作与发布工具包，覆盖从 MKV 素材提取到 BT 发布的全流程。
+`bml-subpro` 是一套面向 **BML 动漫字幕制作 / 转录 / 编码 / 封装 / 上传 / 做种 / 发布** 的 Python 工具库。  
+它不是偏一次性命令的 CLI，而是更适合在 **Python 脚本、Jupyter Notebook、工作流编排代码** 中按模块组合使用。
 
-## 安装
+包名：`bmlsub`
+仓库路径：`Project/bml-subpro`
 
-### pip 安装
+---
+
+## 1. 功能总览
+
+本项目围绕单集与合集两种场景提供能力：
+
+- 单集资源扫描与上下文发现
+- MKV 音轨 / 字幕轨提取
+- MLX Whisper 转录
+- HEVC / x264 编码
+- ASS 字幕头校验、标准化与内置繁化姬简繁转换
+- MKV 内封 / MP4 硬压封装
+- Cloudflare R2 上传
+- `.torrent` 生成与磁力信息读取
+- qBittorrent 做种
+- anibt 发布辅助
+- Workstation / 合集目录规划与批量检查
+
+---
+
+## 2. 安装与环境
+
+### 2.1 Python 环境
+
+按当前工作约定，默认使用：
 
 ```bash
-# git 协议（需要系统有 git）
-
-pip install git+https://github.com/microseventh/bmlsub.git
+conda activate base
 ```
 
-### 系统依赖
-
-
-| 工具                   | 安装方式                                                               | 用途                           | 必需 |
-| ---------------------- | ---------------------------------------------------------------------- | ------------------------------ | ---- |
-| `ffmpeg`               | `brew install ffmpeg` / `apt install ffmpeg`                           | 音视频编解码、字幕提取/烧录    | ✅   |
-| `mkvtoolnix`           | `brew install mkvtoolnix` / `apt install mkvtoolnix`                   | MKV 封装、元数据清理           | ✅   |
-| `libtorrent-rasterbar` | `brew install libtorrent-rasterbar` / `apt install python3-libtorrent` | BT 种子生成（[torrent] extra） | 可选 |
-| `croc`                 | `brew install croc` / `curl https://getcroc.schollz.com | bash`        | P2P 加密传输                   | 可选 |
-| `rclone`               | `brew install rclone` / `apt install rclone`                           | R2 → 服务器同步（服务器端）   | 可选 |
-
-### 开发安装
+### 2.2 安装项目
 
 ```bash
-git clone https://github.com/microseventh/bmlsub.git
-cd bmlsub
+conda activate base
+cd /Users/miwata/Movies/BML/Project/bml-subpro
 pip install -e ".[all]"
 ```
 
-> **完整可运行示例见 [rei.ipynb](https://github.com/microseventh/bmlsub/blob/main/rei.ipynb)** — 包含从头到尾的完整流水线代码，可作为实际项目模板参考。
+### 2.3 Python 依赖
+
+主要依赖包括：
+
+- `tqdm`
+- `boto3`
+- `botocore`
+- `requests`
+- `pydub`
+- `qbittorrent-api`
+- `mlx-whisper`（转录）
+- `libtorrent`（种子）
+- `huggingface_hub`（模型下载）
+
+### 2.4 系统依赖
+
+| 工具 | 用途 |
+| --- | --- |
+| `ffmpeg` | 音轨提取、字幕提取、转码、硬压 |
+| `ffprobe` | 媒体流信息探测、元数据检查 |
+| `mkvmerge` | MKV 内封 |
+| `mkvpropedit` | MKV 元数据清理 |
 
 ---
 
-## 快速开始
-
-### 项目模板
-
-换项目时只需改模板部分的几行常量。后续每个阶段独立运行、前置条件检查、自动备份旧文件。
+## 3. 快速导入
 
 ```python
 from bmlsub import (
-    MediaExtractor, Transcriber, Encoder, SubtitleValidator,
-    TorrentCreator, Transfer, R2Uploader, RemoteSeeder, Publisher,
-    PRESET_HEVC_VT_DEFAULT, PRESET_X264_SLOW, SUB_STANDARD_HD,
-    PipelineTimer, backup_if_exists,
-    product_path, product_torrent_path, scan_products,
+    Pipeline,
+    PipelineConfig,
+    ProjectNaming,
+    WorkstationConfig,
+    R2Uploader,
+    Packager,
+    Transcriber,
+    Encoder,
+    SubtitleValidator,
+    SubtitleConversionConfig,
+    TorrentCreator,
+    Publisher,
 )
+```
+
+---
+
+## 4. 推荐使用入口
+
+### 4.1 单集推荐入口：`Pipeline`
+
+```python
 from pathlib import Path
-import subprocess, fnmatch
-
-EP_DIR = Path(".").resolve()
-EP_ID = "01"
-SRC = EP_DIR / f"{EP_ID}.mkv"
-
-# ── 项目模板（换项目时只改这几行）──
-PREFIX_CHS = "[Billion Meta Lab] 作品名"
-PREFIX_CHT = "[Billion Meta Lab] 作品名（繁体）"
-R2_FOLDER = "作品名"
-SSH_ALIAS = "my-server"
-REMOTE_DIR = "/path/to/downloads"
-BGM_ID = 572613
-
-# 产物路径（由 product_path 统一生成）
-mp4_chs  = product_path(EP_DIR, EP_ID, "mp4_chs",  PREFIX_CHS, PREFIX_CHT)
-mp4_cht  = product_path(EP_DIR, EP_ID, "mp4_cht",  PREFIX_CHS, PREFIX_CHT)
-mkv_hevc = product_path(EP_DIR, EP_ID, "mkv_hevc", PREFIX_CHS, PREFIX_CHT)
-```
-
-`mp4_chs` `mp4_cht` `mkv_hevc` 分别对应三个标准产物路径，后续所有阶段通过它们做前置检查和生成。
-
----
-
-## 完整流水线教程
-
-> 以下每个阶段独立可运行，中间产物会被自动跳过（已有则不再重复生成），覆盖旧文件前自动备份到 `_backup/` 目录。
-
-### 阶段 1：提取字幕 & 音轨
-
-从 MKV 中提取所有音轨和字幕轨，支持智能筛选（中/英/日优先）。
-
-```python
-extractor = MediaExtractor(EP_DIR)
-
-# 列出字幕流（不提取，供预览）
-sub_list = extractor.list_subtitle_streams(SRC)
-for s in sub_list:
-    print(f"  [{s.index}] lang={s.language} title='{s.title}' codec={s.codec_name}")
-
-# 提取所有字幕轨 → {stem}_sub_{lang}_{index}.ass
-all_subs = extractor.extract_subtitle_tracks(SRC)
-
-# 提取所有音轨 → {stem}_audio_{lang}_{index}.aac
-audio_tracks = extractor.extract_audio_tracks(SRC)
-
-# 智能筛选提取：中文 > 英文 > 日文 > 其他（按优先级分类）
-preferred = extractor.extract_preferred_subtitles(SRC)
-if preferred:
-    print(preferred.summary())       # "中文 2 条; 日文 1 条"
-    for t in preferred.all_tracks(): # 遍历所有筛选结果
-        print(t.output_path)
-```
-
-**关键参数说明：**
-
-- `MediaExtractor(work_dir)`：`work_dir` 为工作目录，提取产物输出到此目录。
-- `list_subtitle_streams(video)` → `list[SubtitleInfo]`：列出字幕流元信息，不提取。`SubtitleInfo` 含 `index`（流索引）、`language`（语言代码如 `chi`/`eng`/`jpn`）、`title`（轨道标题）、`codec_name`（编码如 `subrip`/`ass`）。
-- `extract_audio_tracks(video, progress=None)`：提取所有音轨为 AAC 192k，文件名 `{stem}_audio_{lang}_{index}.aac`。`progress` 可选传入 tqdm 兼容对象显示进度。返回 `list[ExtractedTrack]`。
-- `extract_subtitle_tracks(video)`：提取所有字幕轨为 ASS 格式，文件名 `{stem}_sub_{lang}_{index}.ass`。
-- `extract_preferred_subtitles(video, langs=None)`：智能筛选。`langs` 自定义语言优先级，默认 `["chi", "eng", "jpn"]`。若只有一种语言则全量提取。返回 `PreferredSubs` 或 `None`（无字幕）。
-- `extract_all(video)` → `(音频列表, 字幕列表)`：一键全量提取。
-- `extract_smart(video)` → `(音频列表, 智能筛选结果)`：音轨全量 + 字幕智能筛选。
-- `get_audio_track(video, index=0)` → `Path | None`：快速获取第 N 条音轨路径。
-
-**数据类：**
-
-- `ExtractedTrack(index, codec_type, language, title, codec_name, output_path)`：提取后的轨道信息，`codec_type` 为 `"audio"` 或 `"subtitle"`。
-- `PreferredSubs(chi, eng, jpn, other)`：按语言分类的提取结果。属性：`.total_count`、`.has_any`；方法：`.all_tracks()` 返回全部列表、`.summary()` 返回中文摘要字符串。
-- `SubtitleInfo(index, language, title, codec_name)`：字幕轨道元信息。
-
-### 阶段 2：AI 转录（MLX Whisper）
-
-> **macOS 专用：** MLX Whisper 仅支持 macOS（Apple Silicon 原生加速）。建议先用 `resolve_model()` 确认最佳模型。
-
-支持两种转录方式：直接转录（快速）和分割转录（精细，适合长音频）。
-
-```python
-audio_files = sorted(EP_DIR.glob(f"{EP_ID}_audio_*.aac"))
-if not audio_files:
-    print("⚠️ 未找到音轨文件，跳过转录")
-else:
-    audio_path = audio_files[0]
-
-    # ── 步骤 0：模型选择（推荐先执行）──
-    from bmlsub import resolve_model, print_model_guide
-
-    # 打印完整指引（当前平台 / 已缓存 / 推荐模型列表）
-    print_model_guide(language="ja")
-
-    # 自动选择最佳模型 + 检查是否已下载
-    info = resolve_model(language="ja")
-    print(f"推荐模型: {info.model_id}")
-    print(f"已下载: {'✅' if info.available else '❌ 需下载'}")
-
-    # 如未下载：手动下载（MLX 模型首次调用时也会自动下载）
-    # if not info.available:
-    #     from bmlsub import download_model
-    #     download_model(info.model_id)
-
-    # ── 步骤 1：创建 Transcriber ──
-    transcriber = Transcriber(
-        model=info.model_id,   # 使用解析后的模型
-        language="ja",
-        chunk_sec=240,         # 切片长度（秒）
-        overlap_sec=5,         # 切片重叠（秒）
-        export_format="mp3",   # 切片导出格式
-        output_root="./output_transcripts",
-    )
-
-    # 方法 1：直接转录 — 整轨一次性转录，速度快
-    direct = transcriber.transcribe_direct(
-        audio_path,
-        model="mlx-community/whisper-large-v3-turbo",
-        # output_path=...   # 自定义输出路径
-        # force=False,       # True=强制覆盖
-    )
-
-    # 方法 2：分割转录 — 滑动窗口切片 → 逐片转录 → 合并，精细度高
-    chunked = transcriber.transcribe_chunked(
-        audio_path,
-        model="mlx-community/whisper-medium-mlx",
-        manual_cuts=["1:30", "22:00"],  # 手动切点（跳过 OP/ED）
-        # output_dir=...    # 自定义工作目录
-        # force=False,       # True=强制覆盖
-    )
-
-    # 便捷方法：两种方法依次执行
-    both = transcriber.transcribe_both(
-        audio_path,
-        fast_model="mlx-community/whisper-large-v3-turbo",
-        detailed_model="mlx-community/whisper-medium-mlx",
-        manual_cuts=["1:30", "22:00"],
-    )
-    # → {"direct": Path | None, "chunked": Path | None}
-```
-
-**关键参数说明：**
-
-**`Transcriber` 构造函数：**
-
-
-| 参数            | 类型  | 默认值                                   | 说明                                 |
-| --------------- | ----- | ---------------------------------------- | ------------------------------------ |
-| `model`         | `str` | `"mlx-community/whisper-large-v3-turbo"` | 默认模型（HF repo 路径）             |
-| `language`      | `str` | `"ja"`                                   | 音频语言代码                         |
-| `chunk_sec`     | `int` | `240`                                    | 分割转录时每段切片长度（秒）         |
-| `overlap_sec`   | `int` | `5`                                      | 相邻切片重叠时长（秒），防止边界截断 |
-| `export_format` | `str` | `"mp3"`                                  | 切片导出音频格式                     |
-| `output_root`   | `str  | Path`                                    | `"./output_transcripts"`             |
-
-**`transcribe_direct(audio_path, model=None, output_path=None, force=False)`：**
-
-- `audio_path`：音频文件路径（必需）。
-- `model`：覆盖默认模型，`None` 使用构造时的 `self.model`。
-- `output_path`：自定义输出路径，`None` 自动生成 `{stem}_direct_{模型简称}.txt`。
-- `force`：`True` 强制重新转录，忽略已存在的输出文件。
-- 返回 `Path` 指向转录文本文件；异常抛出 `TranscriptionError`。
-
-**`transcribe_chunked(audio_path, model=None, manual_cuts=None, output_dir=None, force=False)`：**
-
-- `audio_path`：音频文件路径（必需）。
-- `model`：覆盖默认模型。
-- `manual_cuts`：手动切点列表，如 `["10:00", "20:00"]`，用于跳过 OP/ED 段落。每个切点格式为 `"MM:SS"` 或 `"HH:MM:SS"`。
-- `output_dir`：切片工作目录，`None` 自动创建 `output_transcripts/work_{stem}_{模型简称}/`。
-- `force`：`True` 强制重新转录。
-- 内部流程：音频分段 → 滑窗切片 → 逐片 `mlx_whisper.transcribe()` → 文本合并。
-- 返回 `Path` 指向最终合并文本 `{stem}_chunked_{模型简称}_final.txt`。
-
-**`transcribe_both(audio_path, fast_model, detailed_model, manual_cuts=None)`：**
-
-- 依次执行直接转录（用 `fast_model`）和分割转录（用 `detailed_model`）。
-- 单个方法失败不会中断另一个。
-- 返回 `{"direct": Path|None, "chunked": Path|None}`。
-
-**推荐模型：**
-
-
-| 模型                                     | 速度 | 精度 | 适用场景                  |
-| ---------------------------------------- | ---- | ---- | ------------------------- |
-| `mlx-community/whisper-large-v3-turbo`   | 快   | 高   | 直接转录                  |
-| `mlx-community/whisper-medium-mlx`       | 中   | 中   | 分割转录                  |
-| `mlx-community/kotoba-whisper-v2.0-8bit` | 快   | 最高 | 日语专用（需要自行转mlx） |
-
-**辅助函数：**
-
-- `model_short_name(model_path)`：从完整 HF 路径提取简短模型名。如 `"mlx-community/whisper-large-v3-turbo"` → `"large-v3-turbo"`。
-
-### 阶段 3：HEVC VideoToolbox 硬件编码
-
-Mac 平台使用 VideoToolbox 进行 HEVC 10bit 硬件加速编码。
-
-```python
-encoder = Encoder(PRESET_HEVC_VT_DEFAULT, PRESET_X264_SLOW)
-
-if SRC.exists():
-    hevc_path = encoder.encode_hevc_vt(SRC)
-    # → {id}_HEVC10bit.mkv
-
-    # 验证编码产物元数据是否干净
-    issues = encoder.verify_metadata_clean(hevc_path)
-    if not issues:
-        print("✅ 元数据完全干净！")
-    else:
-        print(f"⚠️ 残留言标签: {issues}")
-```
-
-**关键参数说明：**
-
-**`Encoder` 构造函数：**
-
-
-| 参数          | 类型          | 默认值 | 说明                     |
-| ------------- | ------------- | ------ | ------------------------ |
-| `hevc_preset` | `EncodePreset | None`  | `PRESET_HEVC_VT_DEFAULT` |
-| `x264_preset` | `EncodePreset | None`  | `PRESET_X264_SLOW`       |
-
-**`encode_hevc_vt(src, dst=None, audio_streams=None, strip_metadata=True)` → `Path`：**
-
-- `src`：源 MKV 文件路径。
-- `dst`：输出路径。默认 `{src.stem}_HEVC10bit.mkv`。
-- `audio_streams`：保留的音轨流索引列表，如 `[0, 2]`。`None` = 保留全部音轨。
-- `strip_metadata`：编码后是否清理元数据（`mkvpropedit --delete-track-statistics-tags` + `--tags all:`）。`True` 为默认。
-- 内部流程：ffmpeg HEVC VideoToolbox 编码 → `mkvpropedit` 深度清理 → 回退 ffmpeg 流拷贝（若 mkvpropedit 不可用）。
-
-**`encode_x264(src, dst, ass_subtitle=None, preset=None)` → `Path`：**
-
-- `src`：源视频路径。
-- `dst`：输出 `.mp4` 路径（必需）。
-- `ass_subtitle`：ASS 字幕文件路径，`None` = 不烧录。
-- `preset`：覆盖默认 x264 预设。
-
-**`strip_metadata(video_path)` → `Path`：**
-
-- 单独执行元数据深度清理。先用 `mkvpropedit`，失败则回退 `ffmpeg -c copy`。
-
-**`verify_metadata_clean(video_path)` → `dict`：**
-
-- 返回残留的源泄露标签。空 `dict` = 完全干净。
-- 检查项包括：`_STATISTICS_*` 标签、`BPS`、`DURATION`、`NUMBER_OF_FRAMES`、`title`、`HANDLER_NAME`、`VENDOR_ID` 等。
-
-### 阶段 4：字幕处理流水线
-
-**4a.** 清理阶段 1 提取的原始字幕（备份而非删除），只保留制作组字幕。  
-**4b.** 繁化姬 API 简→繁转换（`*.chs&jpn.ass` → `*.cht&jpn.ass`，台湾繁体）。  
-**4c.** 校验并标准化所有 `.ass` 文件的 ASS 头部。
-
-```python
-# 4a. 清理多余字幕，备份到 _backup/ 目录
-KEEP_PATTERNS = ("*.chs&jpn.ass", "*.cht&jpn.ass", "*.chs.ass", "*.cht.ass")
-
-for f in sorted(EP_DIR.glob("*.ass")):
-    if not any(fnmatch.fnmatch(f.name, p) for p in KEEP_PATTERNS):
-        backup_if_exists(f)  # 移动到 _backup/ 而非直接删除
-
-# 4b. 繁化姬 简→繁转换（台湾繁体）
-import requests, time
-
-chs_ass_files = sorted(EP_DIR.glob("*.chs&jpn.ass"))
-for chs_file in chs_ass_files:
-    cht_file = chs_file.with_name(chs_file.name.replace(".chs&jpn.ass", ".cht&jpn.ass"))
-
-    # 幂等保护：繁体字幕已是最新则跳过
-    if cht_file.exists() and cht_file.stat().st_mtime > chs_file.stat().st_mtime:
-        continue
-
-    chs_content = chs_file.read_text(encoding="utf-8")
-    resp = requests.post(
-        "https://api.zhconvert.org/convert",
-        data={"text": chs_content, "converter": "Taiwan"},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    result = resp.json()
-    if result.get("code") == 0:
-        backup_if_exists(cht_file)
-        cht_file.write_text(result["data"]["text"], encoding="utf-8")
-    time.sleep(1)  # API 限速
-
-# 4c. 校验并标准化 ASS 头部
-validator = SubtitleValidator(SUB_STANDARD_HD)
-
-for ass in sorted(EP_DIR.glob("*.ass")):
-    violations = validator.validate_ass_header(ass)
-    if violations:
-        print(f"  {ass.name}: 不合规字段 → {list(violations.keys())}")
-        validator.standardize_ass(ass)
-    else:
-        print(f"  ✅ {ass.name} 已合规")
-```
-
-> **繁化姬 API**：https://api.zhconvert.org/convert — 免费非商业使用，无需 API Key。参考 [Sublime-Fanhuaji](https://github.com/Fanhuaji/Sublime-Fanhuaji)。
-
-**关键参数说明：**
-
-**`SubtitleValidator` 构造函数：**
-
-
-| 参数       | 类型              | 默认值 | 说明              |
-| ---------- | ----------------- | ------ | ----------------- |
-| `standard` | `SubtitleStandard | None`  | `SUB_STANDARD_HD` |
-
-**`SubtitleStandard` 数据类：**
-
-
-| 参数                       | 类型  | 默认值     | 说明                                    |
-| -------------------------- | ----- | ---------- | --------------------------------------- |
-| `play_res_x`               | `int` | `1920`     | 播放分辨率宽                            |
-| `play_res_y`               | `int` | `1080`     | 播放分辨率高                            |
-| `color_matrix`             | `str` | `"TV.709"` | 色彩矩阵（ASS 头部`YCbCr Matrix`）      |
-| `script_type`              | `str` | `"v4.00+"` | 脚本类型（`ScriptType`）                |
-| `wrap_style`               | `int` | `0`        | 换行风格（`WrapStyle`）                 |
-| `scaled_border_and_shadow` | `str` | `"yes"`    | 边框阴影缩放（`ScaledBorderAndShadow`） |
-
-**`validate_ass_header(ass_path)` → `dict[str, str]`：**
-
-- 检查 ASS 文件 `[Script Info]` 段是否与标准一致。
-- 返回不合规字段的 `{字段名: 当前值}` 字典。空 `dict` = 完全合规。
-
-**`standardize_ass(ass_path, output_path=None)` → `Path`：**
-
-- 就地修正 ASS 头部（先备份到 `_backup/`）。
-- `output_path`：`None` = 覆盖原文件；指定路径 = 输出到新文件。
-- 不修改 `[V4+ Styles]` 和 `[Events]` 段的内容。
-
-**`check_subtitle_exists(episode_dir, episode_id, sub_type)` → `Path | None`：**
-
-- 检查 `{episode_id}.{sub_type}&jpn.ass` 是否存在。`sub_type` 为 `"chs"` 或 `"cht"`。
-
-**`validate_for_episode(episode_dir, episode_id)` → `dict`：**
-
-- 单集完整字幕状态校验。返回 `{"chs": {...}, "cht": {...}, "all_ok": bool}`。
-
-**`standardize_extracted_subs(episode_dir, episode_id)` → `list[Path]`：**
-
-- 批量标准化 `{ep_id}_sub_*.ass` 原始提取文件。
-
-### 阶段 5：x264 软编码 + ASS 硬字幕烧录
-
-将 ASS 字幕通过 ffmpeg `ass` 滤镜烧录到视频中，输出简体/繁体两个 MP4。
-
-```python
-chs_sub = EP_DIR / f"{EP_ID}.chs&jpn.ass"
-cht_sub = EP_DIR / f"{EP_ID}.cht&jpn.ass"
-
-if chs_sub.exists() or cht_sub.exists():
-    from bmlsub import PRESET_X264_SLOW
-    encode_params = (
-        PRESET_X264_SLOW.to_ffmpeg_video_params()
-        + PRESET_X264_SLOW.to_ffmpeg_audio_params()
-        + ["-map_metadata", "-1", "-fflags", "+bitexact", "-flags:v", "+bitexact"]
-    )
-
-    for sub_path, out_path, label in [
-        (chs_sub, mp4_chs, "简体中文"),
-        (cht_sub, mp4_cht, "繁體中文"),
-    ]:
-        if sub_path.exists():
-            backup_if_exists(out_path)
-            subprocess.run([
-                "ffmpeg", "-y", "-i", str(SRC),
-                "-vf", f"ass='{sub_path.absolute()}'",
-            ] + encode_params + [str(out_path)], check=True)
-```
-
-> 也可使用 `Packager.ffmpeg_hardsub_encode()` 或 `Encoder.encode_x264()` 封装此流程。
-
-### 阶段 6：mkvmerge 封装
-
-将 HEVC 视频 + 简繁 ASS 字幕 + 字体附件封装为最终发布 MKV。
-
-```python
-hevc_mkv = EP_DIR / f"{EP_ID}_HEVC10bit.mkv"
-fonts = []
-for ext in ("*.ttf", "*.otf", "*.ttc"):
-    fonts.extend(EP_DIR.glob(ext))
-
-if hevc_mkv.exists() and chs_sub.exists() and cht_sub.exists() and fonts:
-    backup_if_exists(mkv_hevc)
-
-    cmd = ["mkvmerge", "-o", str(mkv_hevc), str(hevc_mkv)]
-    cmd += ["--language", "0:chi", "--track-name", "0:简体中文+日语",
-            "--default-track", "0:yes", str(chs_sub)]
-    cmd += ["--language", "0:chi", "--track-name", "0:繁體中文+日语",
-            "--default-track", "0:no", str(cht_sub)]
-    for font in fonts:
-        cmd += ["--attachment-mime-type", "application/x-truetype-font",
-                "--attach-file", str(font)]
-
-    subprocess.run(cmd, check=True, timeout=600)
-```
-
-> 也可使用 `Packager.mkvmerge_package()` 封装此流程，自动匹配字幕和字体文件。
-
-### 阶段 7：生成种子
-
-基于 libtorrent 生成 BT 种子，内建 42 个动漫 tracker。
-
-```python
-targets = [p for p in (mp4_chs, mp4_cht, mkv_hevc) if p.exists()]
-
-if targets:
-    creator = TorrentCreator()
-    for video in targets:
-        creator.create(video, v1_only=True)  # anibt.net（动漫花园）需要 v1 only
-```
-
-**关键参数说明：**
-
-**`TorrentCreator` 构造函数：**
-
-
-| 参数             | 类型       | 默认值  | 说明                              |
-| ---------------- | ---------- | ------- | --------------------------------- |
-| `trackers`       | `list[str] | None`   | `None`（使用 `DEFAULT_TRACKERS`） |
-| `extra_trackers` | `list[str] | None`   | `None`                            |
-| `piece_length`   | `int       | None`   | `None`（自动计算）                |
-| `comment`        | `str`      | `""`    | 种子注释                          |
-| `created_by`     | `str`      | `"BML"` | 创建者标识                        |
-
-**`create(src, dst=None, v1_only=False)` → `Path`：**
-
-- `src`：源文件/目录路径。
-- `dst`：输出 `.torrent` 路径。`None` = 自动放在 `src` 同目录下，文件名 `{src.name}.torrent`。
-- `v1_only`：`True` = 仅生成 v1 种子（兼容动漫花园/anibt.net）；`False` = v1+v2 hybrid。
-- 内部流程：libtorrent 文件存储 → 自动分块大小计算 → 添加 tracker（每个独立 tier）→ 计算 piece hashes → 写入 bencode。
-
-**分块大小自动计算规则：**
-
-
-| 数据量   | 分块大小 |
-| -------- | -------- |
-| < 64 MB  | 64 KB    |
-| < 512 MB | 256 KB   |
-| < 2 GB   | 1 MB     |
-| < 8 GB   | 4 MB     |
-| ≥ 8 GB  | 8 MB     |
-
-**`DEFAULT_TRACKERS`**：内建 42 个动漫 tracker，包括 nyaa、bangumi、acgtracker、openbittorrent 等。
-
-### 阶段 7b：文件夹种子
-
-```python
-FOLDER = EP_DIR
-folder = Path(FOLDER)
-torrent_path = folder.parent / f"{folder.name}.torrent"
-if not torrent_path.exists():
-    TorrentCreator().create(folder, v1_only=True)
-```
-
-### 阶段 9：R2 上传
-
-通过 Cloudflare R2 S3 兼容 API 上传文件，大文件（≥50MB）自动分片并发上传。
-
-```python
-targets = []
-for p in (mp4_chs, mp4_cht, mkv_hevc):
-    if p.exists():
-        targets.append(p)
-        t = p.with_suffix(p.suffix + ".torrent")
-        if t.exists():
-            targets.append(t)
-
-if targets:
-    uploader = R2Uploader()  # 凭证: ~/.config/bml/r2_config.json
-    uploader.upload_files([str(t) for t in targets],
-                          remote_folder=f"{R2_FOLDER}/{EP_ID}")
-```
-
-**关键参数说明：**
-
-**`R2Uploader` 构造函数：**
-
-
-| 参数                | 类型 | 默认值 | 说明                 |
-| ------------------- | ---- | ------ | -------------------- |
-| `account_id`        | `str | None`  | `None`（从配置读取） |
-| `access_key_id`     | `str | None`  | `None`（从配置读取） |
-| `secret_access_key` | `str | None`  | `None`（从配置读取） |
-| `bucket_name`       | `str | None`  | `None`（从配置读取） |
-| `endpoint`          | `str | None`  | `None`（自动拼接）   |
-
-凭证优先级：**构造函数参数 > 环境变量 > `~/.config/bml/r2_config.json`**
-
-**`upload_file(local_path, remote_key=None, progress=True)` → `str`：**
-
-- `local_path`：本地文件路径。
-- `remote_key`：R2 对象 key，`None` = 使用文件名。
-- `progress`：是否打印进度。
-- < 50MB 单次 PUT；≥ 50MB 分片上传（每片 50MB，最多 3 片并发，3 次重试）。
-
-**`upload_files(paths, remote_folder="", progress=True)` → `list[str]`：**
-
-- 批量上传，`remote_folder` 为 R2 目标文件夹（如 `"番剧名/01/"`）。单个文件失败不会中断其他文件。
-
-**`sync_to_server(ssh_alias, remote_dir, r2_prefix="", delete_after=True)` → `bool`：**
-
-- 流程：`rclone sync` → 逐文件 SHA-256 校验 → 校验通过后删除 R2 文件。
-- `ssh_alias`：`~/.ssh/config` 中的别名。
-- `remote_dir`：服务器目标目录。
-- `r2_prefix`：R2 上要同步的前缀。
-- `delete_after`：校验通过后是否删除 R2 文件。**安全机制**：如果没有本地哈希记录且 `delete_after=True`，拒绝删除。
-
-**`list_remote(prefix="")` → `list[str]`**：列出 R2 文件 key 列表。
-
-**`delete_remote(key)` → `bool`**：删除单个 R2 文件。
-
-### 阶段 10：服务器 rclone 拉取
-
-```python
-uploader = R2Uploader()
-r2_folder = f"{R2_FOLDER}/{EP_ID}"
-
-if uploader.list_remote(r2_folder):
-    uploader.sync_to_server(
-        ssh_alias=SSH_ALIAS,
-        remote_dir=REMOTE_DIR,
-        r2_prefix=r2_folder,
-    )
-    # 自动: rclone sync → SHA-256 校验 → 删除 R2 文件
-```
-
-> 服务器需预先配置 rclone R2 remote（`rclone config`，创建名为 `r2` 的 S3 兼容 remote）。
-
-### 阶段 11：远程做种
-
-通过 SSH + qBittorrent Web API 将服务器上的种子添加做种。
-
-```python
-result = subprocess.run(
-    ["ssh", SSH_ALIAS, f"ls '{REMOTE_DIR}'/*.torrent 2>/dev/null || echo ''"],
-    capture_output=True, text=True, timeout=15,
+from bmlsub import Pipeline, PipelineConfig, ProjectNaming
+
+work_dir = Path('/Users/miwata/Movies/BML/Project/01')
+project = ProjectNaming(
+    group='Billion Meta Lab',
+    name_chs='作品名',
+    name_cht='作品名',
+    romaji='Romaji',
 )
-torrent_files = [f for f in result.stdout.strip().split("\n") if f]
+config = PipelineConfig(work_dir=work_dir, project=project)
+pipe = Pipeline(config)
 
-if torrent_files:
-    seeder = RemoteSeeder(ssh_alias=SSH_ALIAS)
-    seeder.add_torrents(torrent_files, save_path=REMOTE_DIR,
-                        skip_checking=True, paused=False)
+summary = pipe.inspect_episode(work_dir, episode_id='01')
+print(summary)
 ```
 
-**关键参数说明：**
-
-**`RemoteSeeder` 构造函数：**
-
-
-| 参数            | 类型  | 默认值   | 说明                            |
-| --------------- | ----- | -------- | ------------------------------- |
-| `ssh_alias`     | `str` | （必需） | `~/.ssh/config` 中配置的别名    |
-| `host`          | `str  | None`    | `None`（从配置读取）            |
-| `port`          | `int  | None`    | `None`（从配置读取，默认 8081） |
-| `username`      | `str  | None`    | `None`（从配置读取）            |
-| `password`      | `str  | None`    | `None`（从配置读取）            |
-| `download_base` | `str  | None`    | `None`（从配置读取）            |
-
-凭证优先级：**构造函数参数 > 环境变量 > `~/.config/bml/qb_config.json`**
-
-**`login()` → `bool`**：登录 qBittorrent Web API，服务器端保存会话 cookie。
-
-**`logout()` → `bool`**：登出并清理服务器 cookie。
-
-**`add_torrent(remote_torrent_path, save_path=None, skip_checking=True, paused=False)` → `bool`：**
-
-- `remote_torrent_path`：服务器上 `.torrent` 文件绝对路径。
-- `save_path`：视频文件保存路径，默认 `self.download_base`。
-- `skip_checking`：`True` = 跳过哈希校验（文件已在原位）。
-- `paused`：`False` = 立即开始做种；`True` = 暂停状态添加。
-
-**`add_torrents(remote_dir_or_paths, save_path=None, skip_checking=True, paused=False, glob_pattern="*.torrent")` → `dict[str, bool]`：**
-
-- `remote_dir_or_paths`：服务器上目录（自动 find `.torrent`）或文件路径列表。
-- `glob_pattern`：查找 `.torrent` 文件的 glob 模式。
-- 返回 `{basename: True/False}`，`True` = 添加成功。
-
-**`upload_and_seed(torrent_paths, remote_dir=None, save_path=None, skip_checking=True, paused=False)` → `dict[str, bool]`：**
-
-- 先 SCP 上传本地 `.torrent` 到服务器，再添加做种。
-
-**上下文管理器支持：**
+### 4.2 合集 / Workstation 推荐入口：`WorkstationConfig + Pipeline`
 
 ```python
-with RemoteSeeder(ssh_alias="my-server") as seeder:
-    seeder.add_torrents("/path/to/downloads/")
-# 自动 login / logout
+from pathlib import Path
+from bmlsub import Pipeline, PipelineConfig, WorkstationConfig
+
+root = Path('/Users/miwata/Movies/BML/某项目')
+pipe = Pipeline(PipelineConfig(work_dir=root))
+
+ws = WorkstationConfig(
+    root_dir=root,
+    episode_ids='01-12',
+    group='Billion Meta Lab',
+    name_chs='作品名',
+    name_cht='作品名',
+    romaji='Romaji',
+    r2_prefix='作品名/season1',
+    bgm_id=123456,
+)
+
+print(pipe.inspect_workstation(ws).summary())
+print(pipe.plan_workstation(ws).summary())
 ```
-
-### 阶段 12：API 发布
-
-通过 anibt.net API 发布种子，支持 JSON+magnet 和直接上传 `.torrent` 两种方式。
-
-```python
-from bmlsub import Publisher
-
-mp4_chs_t  = product_torrent_path(mp4_chs)
-mp4_cht_t  = product_torrent_path(mp4_cht)
-mkv_hevc_t = product_torrent_path(mkv_hevc)
-
-FORMAT_META = {
-    mp4_chs_t:  ("1080p", ["CHS", "JP"], "MP4", "EMBEDDED"),
-    mp4_cht_t:  ("1080p", ["CHT", "JP"], "MP4", "EMBEDDED"),
-    mkv_hevc_t: ("1080p", ["CHS", "CHT", "JP"], "MKV", "INTERNAL"),
-}
-
-for t in [t for t in (mp4_chs_t, mp4_cht_t, mkv_hevc_t) if t.exists()]:
-    resolution, languages, fmt, subtitle = FORMAT_META[t]
-    Publisher.publish_anibt(
-        bgm_id=BGM_ID, title=t.stem, episode_key=EP_ID,
-        torrent_path=t, resolution=resolution, languages=languages,
-        subtitle=subtitle, fmt=fmt, notes="...", use_torrent_file=True,
-    )
-```
-
-**关键参数说明：**
-
-**`Publisher.publish_anibt()` 完整参数列表：**
-
-
-| 参数               | 类型       | 默认值       | 说明                                                                               |
-| ------------------ | ---------- | ------------ | ---------------------------------------------------------------------------------- |
-| `bgm_id`           | `int`      | （必需）     | Bangumi 条目 ID                                                                    |
-| `title`            | `str`      | （必需）     | 发布标题（含组名、番名、集数等完整信息）                                           |
-| `episode_key`      | `str`      | （必需）     | 集数标识，如`"11"`                                                                 |
-| `torrent_path`     | `str       | Path         | None`                                                                              |
-| `magnet_base64`    | `str       | None`        | `None`                                                                             |
-| `resolution`       | `str`      | `"1080p"`    | 分辨率                                                                             |
-| `languages`        | `list[str] | None`        | `None`（→`[]`）                                                                   |
-| `subtitle`         | `str`      | `"INTERNAL"` | 字幕类型：`"INTERNAL"` / `"EMBEDDED"`                                              |
-| `fmt`              | `str`      | `"MKV"`      | 格式：`"MKV"` / `"MP4"`                                                            |
-| `file_size`        | `int       | None`        | `None`（自动从 torrent 读取）                                                      |
-| `notes`            | `str`      | `""`         | 发布说明（Markdown）                                                               |
-| `trackers`         | `list[str] | None`        | `None`（自动从 torrent 读取）                                                      |
-| `token`            | `str       | None`        | `None`（从配置读取）                                                               |
-| `api_url`          | `str       | None`        | `None`（从配置读取）                                                               |
-| `use_torrent_file` | `bool`     | `False`      | `True` = 直接上传 `.torrent` 文件（multipart）；`False` = 提取 magnet 以 JSON 提交 |
-
-凭证优先级：**函数参数 > 环境变量 `ANIBT_TOKEN`/`ANIBT_API_URL` > `~/.config/bml/anibt_config.json`**
-
-**`Publisher.seed_qbittorrent(host, files, torrent_base_dir=None, download_base="/downloads", username="admin", password="")` → `dict[str, bool]`：**
-
-- 直接连接 qBittorrent Web API 添加做种（使用 `qbittorrentapi` 库）。
-- `host`：`"ip:port"` 格式。
-
-### 流程总览
-
-
-| 阶段 | 说明                   | 前置条件                                      |
-| ---- | ---------------------- | --------------------------------------------- |
-| 1    | 提取音轨 + 字幕        | `{id}.mkv`                                    |
-| 2    | AI 转录                | 音轨 AAC                                      |
-| 3    | HEVC VideoToolbox 编码 | `{id}.mkv`                                    |
-| 4a   | 清理原始字幕（备份）   | `.ass` 文件                                   |
-| 4b   | 繁化姬 简→繁转换       | `{id}.chs&jpn.ass`                            |
-| 4c   | 字幕校验 & 标准化      | `.ass` 文件                                   |
-| 5    | x264 硬压 + ASS 烧录   | `{id}.mkv` + `{id}.chs&jpn.ass`               |
-| 6    | mkvmerge 封装          | `{id}_HEVC10bit.mkv` + 字幕 + 字体            |
-| 7    | 生成 .torrent          | 阶段 5/6 产物                                 |
-| 7b   | 文件夹种子             | 任意目录                                      |
-| 9    | R2 上传                | 阶段 5/6 产物 +`~/.config/bml/r2_config.json` |
-| 10   | R2 → 服务器 rclone    | 阶段 9 + rclone 配置                          |
-| 11   | 远程 qBittorrent 做种  | 阶段 10 +`~/.config/bml/qb_config.json`       |
-| 12   | anibt.net API 发布     | 阶段 7 +`~/.config/bml/anibt_config.json`     |
 
 ---
 
-## 模块概览
+## 5. 包公开导出（`bmlsub.__init__`）
 
-```
-bmlsub/
-├── config.py      # PipelineConfig、EncodePreset、SubtitleStandard、预设常量
-├── media.py       # MediaExtractor — 音轨/字幕提取（含智能筛选）
-├── model_utils.py # 平台检测 & 模型管理 — 自动推荐/检查/下载转录模型
-├── transcribe.py  # Transcriber — MLX Whisper 语音转文字（两种方法）
-├── encode.py      # Encoder — HEVC 硬压 + x264 软编码 + 元数据清理
-├── subtitle.py    # SubtitleValidator — ASS 头部校验与标准化
-├── package.py     # Packager — mkvmerge 封装 + ffmpeg 硬压（自动匹配字幕）
-├── torrent.py     # TorrentCreator — libtorrent 种子生成（42 个动漫 tracker）
-├── transfer.py    # Transfer — croc P2P 加密传输 + SHA-256 双重校验
-├── r2upload.py    # R2Uploader — Cloudflare R2 分片上传 + rclone 同步
-├── seeder.py      # RemoteSeeder — SSH + qBittorrent Web API 远程做种
-├── publish.py     # Publisher — anibt.net API 发布 + qBittorrent 做种
-├── pipeline.py    # Pipeline — 高层流水线编排（一键全流程）
-├── scan.py        # product_path / check_products / scan_products 产物检测
-├── progress.py    # ProgressBar、SpeedMeter、PipelineTimer — 进度与计时
-└── _backup.py     # backup_if_exists — 覆盖前自动备份
-```
+下列对象可直接从 `bmlsub` 顶层导入：
 
-每个模块均可独立使用，不强依赖 Pipeline。
+### 配置与命名
+
+- `PipelineConfig`
+- `EncodePreset`
+- `SubtitleStandard`
+- `SubtitleConversionConfig`
+- `ProductNaming`
+- `LanguageStrategy`
+- `TrackMetaConfig`
+- `ProjectNaming`
+- `WorkstationConfig`
+- `PRESET_HEVC_VT_DEFAULT`
+- `PRESET_X264_SLOW`
+- `PRESET_X264_VERYSLOW`
+- `SUB_STANDARD_HD`
+- `PRODUCT_FORMATS`
+- `parse_episode_ids`
+
+### 媒体 / 转录 / 封装 / 上传
+
+- `MediaExtractor`
+- `ExtractedTrack`
+- `PreferredSubs`
+- `SubtitleInfo`
+- `Transcriber`
+- `TranscriptionError`
+- `model_short_name`
+- `Encoder`
+- `SubtitleValidator`
+- `SubtitleConversionError`
+- `Packager`
+- `PackagingError`
+- `R2Uploader`
+- `R2UploadError`
+
+### 流水线 / 资源发现
+
+- `EpisodeFiles`
+- `Pipeline`
+- `StageStatus`
+- `EpisodeStagePlan`
+- `WorkstationStage0Summary`
+- `WorkstationBatchResult`
+- `scan_products`
+- `check_products`
+- `product_path`
+- `product_torrent_path`
+
+### 种子 / 做种 / 发布
+
+- `TorrentCreator`
+- `DEFAULT_TRACKERS`
+- `TorrentMetadata`
+- `read_torrent_metadata`
+- `RemoteSeeder`
+- `SeederError`
+- `Publisher`
+- `PublishError`
+
+### 进度与模型工具
+
+- `ProgressBar`
+- `SpeedMeter`
+- `StageTimer`
+- `PipelineTimer`
+- `detect_platform`
+- `is_apple_silicon`
+- `get_recommended_models`
+- `check_model_available`
+- `download_model`
+- `resolve_model`
+- `list_cached_models`
+- `print_model_guide`
+- `ModelRecommendation`
+- `ResolvedModel`
+- `backup_if_exists`
 
 ---
 
-## API 参考
+## 6. 核心调用流程
 
-### config.py — 配置 & 预设
+### 6.1 单集完整流程
+
+典型顺序：
+
+1. `inspect_episode()` / `plan_episode()`：先看资源与缺失项
+2. `extract_audio()` / `extract_subtitles()`：提取素材
+3. `transcribe_episode()`：做 AI 转录
+4. `encode_episode()`：生成 HEVC 成品基础视频
+5. `validate_subtitles()`：统一 ASS 头
+6. `package_episode()`：输出 MP4 / MKV
+7. `upload_files_to_r2()`：上传成品
+8. `seed_torrents()`：做种（可选）
+
+### 6.2 一条龙调用
 
 ```python
-from bmlsub import (
-    PipelineConfig, EncodePreset, SubtitleStandard,
-    PRESET_HEVC_VT_DEFAULT, PRESET_X264_SLOW,
-    PRESET_X264_VERYSLOW, SUB_STANDARD_HD,
+result = pipe.process_episode(
+    episode_dir=work_dir,
+    episode_id='01',
+    source_video=work_dir / 'raw_source_v2.mkv',
+    chs_subtitle=work_dir / 'custom_chs.ass',
+    cht_subtitle=work_dir / 'custom_cht.ass',
+    project=project,
+    r2_prefix='作品名/01',
+    skip_seed=True,
+)
+print(result)
+```
+
+说明：即使 `source_video` / `chs_subtitle` / `cht_subtitle` 使用了自定义文件名，
+中间产物和最终产物仍然按 `episode_id='01'` 命名，例如：
+
+- `01_audio_*.aac`
+- `01_sub_*.ass`
+- `01_HEVC10bit.mkv`
+- 最终 MP4 / MKV 成品名中的 `[01]`
+
+### 6.3 只跑本地流程
+
+```python
+result = pipe.process_episode(
+    episode_dir=work_dir,
+    episode_id='01',
+    source_video=work_dir / 'raw_source_v2.mkv',
+    chs_subtitle=work_dir / 'custom_chs.ass',
+    cht_subtitle=work_dir / 'custom_cht.ass',
+    project=project,
+    skip_upload=True,
+    skip_seed=True,
+)
+print(result)
+```
+
+---
+
+## 7. 模块与函数详细说明
+
+以下按文件说明每个主要类、函数、参数和常见调用方式。
+
+---
+
+# 7.1 `config.py`
+
+该模块负责所有配置对象、命名模板、语言策略与批量集数解析。
+
+## `EncodePreset`
+
+编码预设对象。
+
+### 字段
+
+- `codec: str = "hevc_videotoolbox"`：视频编码器名
+- `preset: str = "slow"`：编码 preset
+- `crf: int | None = None`：软编码 CRF
+- `quality: int = 60`：VideoToolbox 质量参数
+- `pixel_fmt: str = "p010le"`：像素格式
+- `audio_codec: str = "aac"`：音频编码器
+- `audio_bitrate: str = "192k"`：音频码率
+- `extra_params: list[str]`：附加 ffmpeg 参数
+
+### `to_ffmpeg_video_params()`
+
+```python
+preset.to_ffmpeg_video_params() -> list[str]
+```
+
+用途：把预设转换成 ffmpeg 视频参数列表。  
+常用于：`Encoder.encode_hevc_vt()`、`Encoder.encode_x264()`。
+
+### `to_ffmpeg_audio_params()`
+
+```python
+preset.to_ffmpeg_audio_params() -> list[str]
+```
+
+用途：生成 ffmpeg 音频参数列表。
+
+---
+
+## `SubtitleStandard`
+
+ASS 字幕头规范。
+
+### 字段
+
+- `play_res_x: int = 1920`
+- `play_res_y: int = 1080`
+- `color_matrix: str = "TV.709"`
+- `script_type: str = "v4.00+"`
+- `wrap_style: int = 0`
+- `scaled_border_and_shadow: str = "yes"`
+
+### `expected_header`
+
+```python
+standard.expected_header -> dict[str, str]
+```
+
+用途：返回标准 ASS 头键值，用于 `SubtitleValidator.validate_ass_header()` 和 `standardize_ass()`。
+
+---
+
+### `SubtitleConversionConfig`
+
+简繁字幕转换配置。
+
+主要字段：
+
+- `api_url: str = 'https://api.zhconvert.org/convert'`：默认繁化姬 API
+- `converter: str = 'Taiwan'`：默认转换模式，台湾繁体
+- `timeout: int = 60`：请求超时秒数
+- `backup_dir_name: str = '_backup'`：旧繁体字幕备份目录名
+- `regenerate_existing_cht: bool = True`：当简繁字幕同时存在时，是否默认以简体为基准重建繁体
+
+---
+
+## `ProductNaming`
+
+最终产物命名模板。
+
+### 字段
+
+- `formats: dict[str, str]`
+  - `mp4_chs`: 简体 MP4 模板
+  - `mp4_cht`: 繁体 MP4 模板
+  - `mkv_hevc`: HEVC MKV 模板
+- `cht_keys: set[str]`：哪些键属于繁体命名
+
+调用方通常无需直接调用方法，而是把它放入 `PipelineConfig.naming` 或 `WorkstationConfig.naming`。
+
+---
+
+## `LanguageStrategy`
+
+字幕语言优先级与语言别名配置。
+
+### 字段
+
+- `preferred: list[str] = ["chi", "eng", "jpn"]`
+- `aliases: dict[str, set[str]]`：语言别名映射
+
+### `classify(lang)`
+
+```python
+LanguageStrategy.classify(lang: str) -> str
+```
+
+参数：
+
+- `lang`：语言代码，如 `chi`、`eng`、`ja`
+
+返回：
+
+- `chi` / `eng` / `jpn` / `other`
+
+用于：智能字幕提取时的语言归类。
+
+---
+
+## `TrackMetaConfig`
+
+MKV 内封时字幕轨道元数据配置。
+
+### 字段
+
+- `names`：轨道标题，如 `简体中文+日语`
+- `defaults`：默认轨标记
+- `languages`：轨语言代码
+
+被 `Packager._detect_subtitle_meta()` 使用。
+
+---
+
+## `_compose_prefix(group, title, romaji)`
+
+```python
+_compose_prefix(group: str, title: str, romaji: str) -> str
+```
+
+用途：拼装 `[字幕组] 标题 罗马字` 前缀。  
+通常不会直接手调，而由 `ProjectNaming.prefix_chs/prefix_cht` 间接调用。
+
+---
+
+## `ProjectNaming`
+
+单项目命名配置。
+
+### 字段
+
+- `group: str = "Billion Meta Lab"`
+- `name_chs: str = "作品名"`
+- `name_cht: str = "作品名"`
+- `romaji: str = "Romaji"`
+
+### `prefix_chs`
+
+```python
+project.prefix_chs -> str
+```
+
+生成简体成品命名前缀。
+
+### `prefix_cht`
+
+```python
+project.prefix_cht -> str
+```
+
+生成繁体成品命名前缀。
+
+### 调用示例
+
+```python
+project = ProjectNaming(
+    group='Billion Meta Lab',
+    name_chs='不虐待我的继母与继姐',
+    name_cht='不虐待我的繼母與繼姐',
+    romaji='Ibitte Konai Gibo to Gishi',
+)
+print(project.prefix_chs)
+print(project.prefix_cht)
+```
+
+---
+
+## `WorkstationConfig`
+
+合集 / 项目级目录配置。
+
+### 构造参数
+
+```python
+WorkstationConfig(
+    root_dir=..., 
+    episode_ids=..., 
+    group='Billion Meta Lab',
+    name_chs='作品名',
+    name_cht='作品名',
+    romaji='Romaji',
+    raw_dir_name='RAW',
+    sub_dir_name='CHS&JPN',
+    sub_tj_dir_name='CHT&JPN',
+    hevc_label='[1080P][HEVC-10bit][简繁日外挂]',
+    chs_label='[1080P][简日内嵌]',
+    cht_label='[1080P][繁日內嵌]',
+    hevc_subdir_name='HEVC-10Bit',
+    r2_prefix='',
+    bgm_id=None,
+    notes='',
+    naming=ProductNaming(),
 )
 ```
 
-#### EncodePreset — 编码预设
+### 常用属性 / 方法
 
-`EncodePreset` 封装了 ffmpeg 视频 + 音频编码参数，通过 `to_ffmpeg_video_params()` 和 `to_ffmpeg_audio_params()` 生成 ffmpeg 命令行参数。
+#### `__post_init__()`
 
+- 规范化 `root_dir`
+- 通过 `parse_episode_ids()` 解析 `episode_ids`
 
-| 参数            | 类型        | 默认值                | 说明                                                                  |
-| --------------- | ----------- | --------------------- | --------------------------------------------------------------------- |
-| `codec`         | `str`       | `"hevc_videotoolbox"` | 视频编码器：`"hevc_videotoolbox"`（Mac 硬压）或 `"libx264"`（软编码） |
-| `preset`        | `str`       | `"slow"`              | x264 preset：`"medium"`、`"slow"`、`"veryslow"` 等（仅 libx264 有效） |
-| `crf`           | `int        | None`                 | `None`                                                                |
-| `quality`       | `int`       | `60`                  | VideoToolbox 质量参数 (0-100)，对应 ffmpeg`-q:v`                      |
-| `pixel_fmt`     | `str`       | `"p010le"`            | 像素格式：`"p010le"`（VT 10bit）或 `"yuv420p"`（x264 8bit）           |
-| `audio_codec`   | `str`       | `"aac"`               | 音频编码器                                                            |
-| `audio_bitrate` | `str`       | `"192k"`              | 音频码率                                                              |
-| `extra_params`  | `list[str]` | `[]`                  | 额外 ffmpeg 参数（如`-tune film`、`-x264-params ...`）                |
+#### `prefix_chs` / `prefix_cht`
 
-**方法：**
+与 `ProjectNaming` 类似，生成合集输出前缀。
 
-- `to_ffmpeg_video_params() → list[str]`：生成视频编码参数列表。
-- `to_ffmpeg_audio_params() → list[str]`：生成音频编码参数列表。
-
-**内置预设常量：**
-
-
-| 常量                     | codec               | preset     | crf/q    | pixel_fmt | 说明                               |
-| ------------------------ | ------------------- | ---------- | -------- | --------- | ---------------------------------- |
-| `PRESET_HEVC_VT_DEFAULT` | `hevc_videotoolbox` | —         | `q:v 60` | `p010le`  | Mac HEVC 10bit 硬压默认            |
-| `PRESET_X264_SLOW`       | `libx264`           | `slow`     | `22`     | `yuv420p` | x264 slow + tune film + 高质量参数 |
-| `PRESET_X264_VERYSLOW`   | `libx264`           | `veryslow` | `22`     | `yuv420p` | x264 veryslow + tune film          |
-
-#### SubtitleStandard — 字幕规范
-
-
-| 参数                       | 类型  | 默认值     | 说明                                    |
-| -------------------------- | ----- | ---------- | --------------------------------------- |
-| `play_res_x`               | `int` | `1920`     | 播放分辨率宽度（ASS`PlayResX`）         |
-| `play_res_y`               | `int` | `1080`     | 播放分辨率高度（ASS`PlayResY`）         |
-| `color_matrix`             | `str` | `"TV.709"` | 色彩矩阵（ASS`YCbCr Matrix`）           |
-| `script_type`              | `str` | `"v4.00+"` | ASS 脚本版本（`ScriptType`）            |
-| `wrap_style`               | `int` | `0`        | 换行风格（`WrapStyle`）                 |
-| `scaled_border_and_shadow` | `str` | `"yes"`    | 边框阴影缩放（`ScaledBorderAndShadow`） |
-
-属性 `expected_header` 返回标准 ASS 头部的 `dict[str, str]`，供 `SubtitleValidator` 使用。
-
-**内置预设：**`SUB_STANDARD_HD = SubtitleStandard()`（即所有默认值）。
-
-#### PipelineConfig — 流水线总配置
-
-`PipelineConfig` 用于 `Pipeline` 高层编排，集中管理所有模块的配置。
-
-
-| 参数                     | 类型               | 默认值                                                      | 说明                                       |
-| ------------------------ | ------------------ | ----------------------------------------------------------- | ------------------------------------------ |
-| `work_dir`               | `Path`             | `Path(".").resolve()`                                       | 工作根目录                                 |
-| `whisper_fast_model`     | `str`              | `"mlx-community/whisper-large-v3-turbo"`                    | 直接转录模型                               |
-| `whisper_detailed_model` | `str`              | `"mlx-community/whisper-medium-mlx"`                        | 分割转录模型                               |
-| `language`               | `str`              | `"ja"`                                                      | 音频语言                                   |
-| `hevc_preset`            | `EncodePreset`     | `EncodePreset()`                                            | HEVC 编码预设                              |
-| `x264_preset`            | `EncodePreset`     | `EncodePreset(codec="libx264", preset="slow", crf=22, ...)` | x264 编码预设（含 tune film 等高质量参数） |
-| `sub_standard`           | `SubtitleStandard` | `SubtitleStandard()`                                        | 字幕校验规范                               |
-| `chunk_sec`              | `int`              | `240`                                                       | 分割转录切片长度（秒）                     |
-| `overlap_sec`            | `int`              | `5`                                                         | 切片重叠（秒）                             |
-| `output_transcripts_dir` | `Path`             | `Path("./output_transcripts")`                              | 转录输出根目录                             |
-
----
-
-### scan.py — 产物命名 & 检测
+#### `effective_episode_ids`
 
 ```python
-from bmlsub import product_path, product_torrent_path, check_products, scan_products, PRODUCT_FORMATS
+ws.effective_episode_ids -> list[str]
 ```
 
-**`PRODUCT_FORMATS`** — 三个标准产物文件名模板（`{prefix}` `{ep_id}` 由调用方填入）：
+如果构造时未传 `episode_ids`，则自动从 `RAW/*.mkv` 推断。
+
+#### `ep_range`
 
 ```python
-{
-    "mp4_chs":  "{prefix} [{ep_id}][1080P][简日内嵌].mp4",
-    "mp4_cht":  "{prefix} [{ep_id}][1080P][繁日內嵌].mp4",
-    "mkv_hevc": "{prefix} [{ep_id}][1080P][HEVC-10bit][简繁日内封].mkv",
-}
+ws.ep_range -> str
 ```
 
-**`product_path(ep_dir, ep_id, product_key, prefix_chs, prefix_cht=None)` → `Path`：**
+返回诸如 `01-12` 的合集范围字符串。
 
-- `ep_dir`：集数目录路径。
-- `ep_id`：集数编号，如 `"01"`。
-- `product_key`：`"mp4_chs"` / `"mp4_cht"` / `"mkv_hevc"`。
-- `prefix_chs`：简体中文前缀，如 `"[Billion Meta Lab] 作品名"`。
-- `prefix_cht`：繁体中文前缀，默认同 `prefix_chs`。
-- 仅构造路径，不检查存在性。`mp4_cht` key 会自动使用繁体前缀。
+#### 目录属性
 
-**`product_torrent_path(video_path)` → `Path | None`：**
+- `raw_dir`
+- `sub_dir`
+- `sub_tj_dir`
+- `hevc_pack_dir`
+- `hevc_sub_dir`
+- `chs_pack_dir`
+- `cht_pack_dir`
 
-- 视频路径 → 对应 `.torrent` 路径（`{video}.torrent`）。`None` 入参返回 `None`。纯构造，不检查存在性。
+#### 关键路径方法
 
-**`check_products(ep_dir, ep_id, prefix_chs, prefix_cht=None)` → `dict`：**
+- `infer_episode_ids()`：从 RAW 目录推断集号
+- `source_video(ep_id)`：返回源视频路径
+- `hevc_raw_video(ep_id)`：返回 HEVC 原始输出路径
+- `resolve_chs_sub(ep_id)`：定位简体字幕文件
+- `resolve_cht_sub(ep_id)`：定位繁体字幕文件
+- `hevc_path(ep_id)`：HEVC 输出路径
+- `x264_path(ep_id, kind)`：MP4 输出路径，`kind` 只能是 `chs` 或 `cht`
+- `release_pack_dir(kind)`：返回发布目录，`kind` 为 `hevc/chs/cht`
+- `release_torrent_path(kind)`：返回发布目录对应的 `.torrent` 路径
 
-- 检查产物文件是否存在。返回：
-  ```python
-  {"mp4_chs": Path | None, "mp4_cht": Path | None,
-   "mkv_hevc": Path | None, "all": list[Path]}
-  ```
+#### 检查与汇总
 
-**`scan_products(ep_dir, ep_id, prefix_chs, prefix_cht=None)` → `dict`：**
+- `stage0_checks()`：逐集检查 RAW / 简中字幕 / 繁中字母是否存在
+- `missing_summary()`：按类别汇总缺失项
+- `sample_outputs()`：给出样例输出路径
+- `summary()`：返回完整配置摘要
 
-- 完整扫描（含种子状态）。比 `check_products` 多出：
-  ```python
-  {"mp4_chs_torrent": Path | None, "mp4_cht_torrent": Path | None,
-   "mkv_hevc_torrent": Path | None, "all_torrents": list[Path]}
-  ```
-
----
-
-### media.py — 素材提取
-
-```python
-from bmlsub import MediaExtractor, ExtractedTrack, PreferredSubs, SubtitleInfo
-```
-
-#### MediaExtractor
-
-**构造函数：`MediaExtractor(work_dir=".")`**
-
-- `work_dir`：工作目录，提取产物输出到此目录。
-
-**方法一览：**
-
-
-| 方法                                             | 说明                                    | 返回类型                  |
-| ------------------------------------------------ | --------------------------------------- | ------------------------- |
-| `find_digit_mkvs()`                              | 找到纯数字命名（如`01.mkv`）的 MKV 文件 | `list[Path]`              |
-| `find_all_mkvs()`                                | 找到所有`.mkv` 文件                     | `list[Path]`              |
-| `probe_streams(video)`                           | ffprobe 获取所有流的 JSON 信息          | `list[dict]`              |
-| `list_subtitle_streams(video)`                   | 列出字幕流元信息（不提取）              | `list[SubtitleInfo]`      |
-| `extract_audio_tracks(video, progress=None)`     | 提取所有音轨 → AAC 192k                | `list[ExtractedTrack]`    |
-| `extract_subtitle_tracks(video)`                 | 提取所有字幕轨 → ASS                   | `list[ExtractedTrack]`    |
-| `extract_preferred_subtitles(video, langs=None)` | 智能筛选（中/英/日优先）                | `PreferredSubs            |
-| `extract_all(video)`                             | 一键全量提取                            | `(音频列表, 字幕列表)`    |
-| `extract_smart(video)`                           | 音轨全量 + 字幕智能筛选                 | `(音频列表, PreferredSubs |
-| `get_audio_track(video, index=0)`                | 快速获取第 N 条音轨                     | `Path                     |
-
-**`extract_preferred_subtitles(video, langs=None)` 详细说明：**
-
-- `langs`：语言优先级列表，默认 `["chi", "eng", "jpn"]`。
-- 排序逻辑：先分类（`chi` / `eng` / `jpn` / `other`），若只有一种语言类别则全量提取，否则按优先级提取。
-- 返回 `PreferredSubs`（含 `.chi` `.eng` `.jpn` `.other` 四个列表）。无字幕时返回 `None`。
-
-**类方法（语言判定）：**
-
-- `MediaExtractor.is_chi(lang)` → `bool`
-- `MediaExtractor.is_eng(lang)` → `bool`
-- `MediaExtractor.is_jpn(lang)` → `bool`
-
-识别语言代码范围：
-
-- 中文：`chi`, `zh`, `zho`, `chs`, `cht`, `zh-cn`, `zh-tw`, `zh-hans`, `zh-hant`
-- 英文：`eng`, `en`, `en-us`, `en-gb`
-- 日文：`jpn`, `ja`, `jp`
-
-#### ExtractedTrack — 提取轨道信息
+### 调用示例
 
 ```python
-@dataclass
-class ExtractedTrack:
-    index: int          # 原始流索引
-    codec_type: str     # 'audio' | 'subtitle'
-    language: str       # 语言代码: 'jpn', 'eng', 'chi'...
-    title: str          # 轨道标题
-    codec_name: str     # 编解码器名
-    output_path: Path   # 提取后的文件路径
-```
-
-#### PreferredSubs — 智能筛选结果
-
-```python
-@dataclass
-class PreferredSubs:
-    chi: list[ExtractedTrack]    # 中文
-    eng: list[ExtractedTrack]    # 英文
-    jpn: list[ExtractedTrack]    # 日文
-    other: list[ExtractedTrack]  # 其他
-```
-
-
-| 属性/方法       | 说明                                     |
-| --------------- | ---------------------------------------- |
-| `.total_count`  | 总轨道数                                 |
-| `.has_any`      | 是否有任何字幕                           |
-| `.all_tracks()` | 返回`chi + eng + jpn + other` 拼接列表   |
-| `.summary()`    | 返回中文摘要，如`"中文 2 条; 英文 1 条"` |
-
-#### SubtitleInfo — 字幕流元信息
-
-```python
-@dataclass
-class SubtitleInfo:
-    index: int          # 流索引
-    language: str       # 语言代码
-    title: str          # 轨道标题（如 'Simplified', 'English'）
-    codec_name: str     # 编码（如 'subrip', 'ass'）
+ws = WorkstationConfig(root_dir=root, episode_ids='01-12')
+print(ws.summary())
+print(ws.source_video('01'))
+print(ws.resolve_chs_sub('01'))
 ```
 
 ---
 
-### model_utils.py — 平台检测 & 模型管理
+## `PipelineConfig`
+
+主流水线配置。
+
+### 主要字段
+
+- `work_dir: Path`：默认工作目录
+- `whisper_fast_model: str`：直接转录模型
+- `whisper_detailed_model: str`：分段转录模型
+- `language: str = 'ja'`
+- `hevc_preset: EncodePreset`
+- `x264_preset: EncodePreset`
+- `sub_standard: SubtitleStandard`
+- `subtitle_conversion: SubtitleConversionConfig`
+- `chunk_sec: int = 240`
+- `overlap_sec: int = 5`
+- `output_transcripts_dir: Path`
+- `naming: ProductNaming`
+- `subtitle_strategy: LanguageStrategy`
+- `track_meta: TrackMetaConfig`
+- `project: ProjectNaming`
+
+### `__post_init__()`
+
+用途：规范化路径，如 `work_dir`、`output_transcripts_dir`。
+
+---
+
+## `parse_episode_ids(value)`
 
 ```python
-from bmlsub import (
-    detect_platform, is_apple_silicon, get_recommended_models,
-    check_model_available, download_model, resolve_model,
-    list_cached_models, print_model_guide,
-    ModelRecommendation, ResolvedModel,
+parse_episode_ids(value: str | list[str] | None) -> list[str]
+```
+
+用途：解析 notebook 风格集号输入。
+
+支持示例：
+
+```python
+parse_episode_ids('01-03')        # ['01', '02', '03']
+parse_episode_ids('01,03,05')     # ['01', '03', '05']
+parse_episode_ids(['01', '02'])   # ['01', '02']
+```
+
+---
+
+# 7.2 `episode.py`
+
+负责“单集上下文发现”，把某一集目录中的视频、字幕、字体、转录输入、成品输出统一收敛为一个对象。
+
+## `EpisodeFiles`
+
+### 主要字段
+
+- `episode_dir: Path`
+- `episode_id: str`
+- `config: PipelineConfig`
+- `pure_mkv: Path | None`：当前单集实际使用的视频输入；默认是 `01.mkv`，也可以由 `source_video` 显式覆盖
+- `hevc_mkv: Path | None`：如 `01_HEVC10bit.mkv`
+- `subtitles: dict[str, list[Path]]`
+- `fonts: list[Path]`
+- `extracted_audio: list[Path]`
+- `extracted_subtitles: list[Path]`
+- `expected_products: dict[str, Path]`
+- `existing_products: dict[str, Path | None]`
+- `torrent_products: dict[str, Path | None]`
+- `source_video_path: Path | None`：显式传入的源视频路径
+- `override_subtitles: dict[str, Path]`：显式传入的 `chs/cht` 字幕覆盖路径
+
+### `discover(...)`
+
+```python
+EpisodeFiles.discover(
+    episode_dir: Path | str,
+    episode_id: str | None = None,
+    prefix_chs: str | None = None,
+    prefix_cht: str | None = None,
+    config: PipelineConfig | None = None,
+    project: ProjectNaming | None = None,
+    source_video: Path | str | None = None,
+    chs_subtitle: Path | str | None = None,
+    cht_subtitle: Path | str | None = None,
+) -> EpisodeFiles
+```
+
+参数：
+
+- `episode_dir`：单集目录
+- `episode_id`：集号；不传时尝试自动推断
+- `prefix_chs` / `prefix_cht`：手工覆盖成品前缀
+- `config`：流水线配置
+- `project`：项目命名配置，优先级高于 `config.project`
+- `source_video`：显式指定源视频路径；不改 `episode_id`，只改输入定位
+- `chs_subtitle` / `cht_subtitle`：显式指定简繁字幕路径；不要求文件名必须是 `01.*.ass`
+
+用途：统一发现单集相关的所有输入 / 输出路径。  
+常作为 `Pipeline.context()` 的底层实现。
+
+### `_resolve_prefixes(...)`
+
+内部方法，负责解析命名优先级：
+
+1. 显式传入的 `prefix_*`
+2. `project.prefix_*`
+3. `config.project.prefix_*`
+
+### `_discover_fonts(directory)`
+
+扫描 `.ttf` / `.otf` / `.ttc` 字体文件。
+
+### `_discover_subtitles(directory, episode_id, config)`
+
+按内建规则扫描字幕文件：
+
+- `chs`
+- `cht`
+- `eng`
+- `jpn`
+- `chi`
+- `other`
+
+### `all_subs`
+
+```python
+ctx.all_subs -> list[Path]
+```
+
+按优先顺序返回所有字幕路径。
+
+### `subtitle_for(sub_type)`
+
+```python
+ctx.subtitle_for(sub_type: str) -> Path | None
+```
+
+参数：
+
+- `sub_type`：如 `chs`、`cht`、`eng`
+
+返回某一类字幕的第一候选文件。
+
+### `summary()`
+
+返回当前集资源摘要字典。
+
+### 调用示例
+
+```python
+ctx = EpisodeFiles.discover(
+    '/path/to/ep01',
+    episode_id='01',
+    source_video='raw_source_v2.mkv',
+    chs_subtitle='custom_chs.ass',
+    cht_subtitle='custom_cht.ass',
+)
+print(ctx.pure_mkv)
+print(ctx.source_video_path)
+print(ctx.override_subtitles)
+print(ctx.all_subs)
+print(ctx.summary())
+```
+
+---
+
+# 7.3 `media.py`
+
+负责媒体流探测、音轨提取、字幕提取与智能筛选。
+
+## 数据类
+
+### `SubtitleInfo`
+
+提取前的字幕轨信息：
+
+- `index`
+- `language`
+- `title`
+- `codec_name`
+
+### `ExtractedTrack`
+
+提取后的轨道信息：
+
+- `index`
+- `codec_type`
+- `language`
+- `title`
+- `codec_name`
+- `output_path`
+
+### `PreferredSubs`
+
+智能字幕筛选结果：
+
+- `chi`
+- `eng`
+- `jpn`
+- `other`
+
+方法：
+
+- `total_count`
+- `has_any`
+- `all_tracks()`
+- `summary()`
+
+---
+
+## `MediaExtractor`
+
+### `__init__(work_dir='.')`
+
+设置默认工作目录，提取后的文件默认落在这里。
+
+### `find_digit_mkvs()`
+
+```python
+extractor.find_digit_mkvs() -> list[Path]
+```
+
+用途：查找形如 `01.mkv` 的原始单集，不包含 `*_HEVC10bit.mkv`。
+
+### `find_all_mkvs()`
+
+返回当前目录全部 `.mkv`。
+
+### `probe_streams(video_path)`
+
+```python
+extractor.probe_streams(video_path: Path) -> list[dict]
+```
+
+用途：通过 `ffprobe` 读取流信息。
+
+### `list_subtitle_streams(video_path)`
+
+返回所有字幕流的 `SubtitleInfo` 列表。
+
+### `extract_audio_tracks(video_path, progress=None, output_stem=None)`
+
+```python
+extractor.extract_audio_tracks(
+    video_path: Path,
+    progress=None,
+    output_stem: str | None = None,
+) -> list[ExtractedTrack]
+```
+
+参数：
+
+- `video_path`：输入 MKV
+- `progress`：可选进度条对象，需要有 `.update(n)`
+- `output_stem`：输出文件名前缀；不传时默认使用 `video_path.stem`
+
+输出文件命名：
+
+- 默认：`{video_path.stem}_audio_{lang}_{index}.aac`
+- 指定 `output_stem='01'` 时：`01_audio_{lang}_{index}.aac`
+
+### `extract_subtitle_tracks(video_path, output_stem=None)`
+
+```python
+extractor.extract_subtitle_tracks(
+    video_path: Path,
+    output_stem: str | None = None,
+) -> list[ExtractedTrack]
+```
+
+输出文件命名：
+
+- 默认：`{video_path.stem}_sub_{lang}_{index}.ass`
+- 指定 `output_stem='01'` 时：`01_sub_{lang}_{index}.ass`
+
+### `extract_preferred_subtitles(video_path, langs=None, output_stem=None)`
+
+```python
+extractor.extract_preferred_subtitles(
+    video_path: Path,
+    langs: list[str] | None = None,
+    output_stem: str | None = None,
+) -> PreferredSubs | None
+```
+
+参数：
+
+- `video_path`：输入视频
+- `langs`：语言优先级，默认 `['chi', 'eng', 'jpn']`
+- `output_stem`：输出文件名前缀；适合让提取结果继续按 `episode_id` 命名
+
+逻辑：
+
+1. 先列出字幕流
+2. 归类为中 / 英 / 日 / 其他
+3. 如果只有一种语言，则全部提取
+4. 否则逐条提取并分桶
+
+### `extract_all(video_path, output_stem=None)`
+
+返回：
+
+```python
+(audio_tracks, subtitle_tracks)
+```
+
+### `extract_smart(video_path, output_stem=None)`
+
+返回：
+
+```python
+(audio_tracks, preferred_subs)
+```
+
+### `get_audio_track(video_path, index=0, output_stem=None)`
+
+快速获取第 `index` 条音轨对应的输出路径。
+
+### 语言工具方法
+
+- `is_chi(lang)`
+- `is_eng(lang)`
+- `is_jpn(lang)`
+
+### 内部辅助方法
+
+- `_get_non_attachment_streams(video_path)`
+- `_get_streams_dict(video_path)`
+- `_classify_lang(lang)`
+- `_extract_single_sub(video_path, stream)`
+- `_stream_to_track(video_path, stream, track_type)`
+- `_bundle_preferred(extracted, info_list)`
+- `_classify_lang_raw(lang)`
+
+### 调用示例
+
+```python
+extractor = MediaExtractor('/path/to/ep01')
+audio_tracks = extractor.extract_audio_tracks(
+    Path('raw_source_v2.mkv'),
+    output_stem='01',
+)
+subs = extractor.extract_preferred_subtitles(
+    Path('raw_source_v2.mkv'),
+    output_stem='01',
+)
+print(audio_tracks)
+print(subs.summary() if subs else '无字幕')
+```
+
+---
+
+# 7.4 `transcribe.py`
+
+负责 AI 转录。
+
+## `TranscriptionError`
+
+转录异常。
+
+## `model_short_name(model_path)`
+
+```python
+model_short_name(model_path: str) -> str
+```
+
+用途：把完整模型路径缩短成输出文件名中的标识。
+
+示例：
+
+```python
+model_short_name('mlx-community/whisper-large-v3-turbo')
+# 'large-v3-turbo'
+```
+
+---
+
+## `Transcriber`
+
+### `__init__(...)`
+
+```python
+Transcriber(
+    model='mlx-community/whisper-large-v3-turbo',
+    language='ja',
+    chunk_sec=240,
+    overlap_sec=5,
+    export_format='mp3',
+    output_root='./output_transcripts',
 )
 ```
 
-> **macOS 专用说明：** MLX Whisper 仅支持 macOS（Apple Silicon 原生加速，Intel 通过 Rosetta 兼容）。非 macOS 平台自动推荐 faster-whisper（CTranslate2）。
+参数说明：
 
-#### detect_platform()
+- `model`：默认模型
+- `language`：语种代码
+- `chunk_sec`：分段转录切片长度
+- `overlap_sec`：切片重叠长度
+- `export_format`：切片导出格式
+- `output_root`：chunked 工作目录根路径
 
-```python
->>> detect_platform()
-{"system": "Darwin", "machine": "arm64", "is_macos": True, "is_apple_silicon": True, "python_version": "3.12..."}
-```
+### `transcribe_direct(audio_path, model=None, output_path=None, force=False)`
 
-返回当前平台信息字典。
+用途：整轨一次性转录，适合快速结果。  
+输出命名：`{stem}_direct_{模型简称}.txt`
 
-#### is_apple_silicon()
+参数：
 
-快捷方法 → `bool`。等价于 `platform.system() == "Darwin" and platform.machine() == "arm64"`。
+- `audio_path`：音频路径
+- `model`：覆盖实例默认模型
+- `output_path`：自定义输出路径
+- `force`：是否强制覆盖已有结果
 
-#### get_recommended_models(language="ja")
+返回：
 
-根据当前平台和语言返回推荐模型列表（`list[ModelRecommendation]`，按优先级排序，第 0 个为首选）。
+- `Path | None`
 
-**推荐逻辑：**
+### `transcribe_chunked(audio_path, model=None, manual_cuts=None, output_dir=None, force=False)`
 
+用途：切片转录后再合并，精细度更高。  
+输出命名：`{stem}_chunked_{模型简称}_final.txt`
 
-| 平台                | 语言 | 首选模型                            | 后端           |
-| ------------------- | ---- | ----------------------------------- | -------------- |
-| macOS Apple Silicon | 日语 | `kotoba-whisper-v2.0-8bit`          | MLX            |
-| macOS Apple Silicon | 通用 | `whisper-large-v3-turbo`            | MLX            |
-| 其他平台            | 日语 | `faster-whisper-large-v3-turbo-ct2` | faster-whisper |
-| 其他平台            | 通用 | `faster-whisper-large-v3-turbo-ct2` | faster-whisper |
+参数：
 
-**`ModelRecommendation` 数据类字段：**
+- `audio_path`
+- `model`
+- `manual_cuts`：如 `['10:00', '20:00']`
+- `output_dir`：工作目录
+- `force`：是否强制重跑
 
+### `transcribe_both(audio_path, fast_model=..., detailed_model=..., manual_cuts=None)`
 
-| 字段             | 类型    | 说明                          |
-| ---------------- | ------- | ----------------------------- |
-| `model_id`       | `str`   | HF repo 路径                  |
-| `backend`        | `str`   | `"mlx"` / `"faster_whisper"`  |
-| `name`           | `str`   | 人类可读简称                  |
-| `description`    | `str`   | 详细说明                      |
-| `speed`          | `str`   | `"最快"` / `"快"` / `"中"`    |
-| `accuracy`       | `str`   | `"最高"` / `"高"` / `"中"`    |
-| `lang_specialty` | `str`   | `"日语专用"` / `"多语言通用"` |
-| `size_gb`        | `float` | 约大小 (GB)                   |
-| `install_cmd`    | `str`   | pip install 命令              |
-| `cache_dir_help` | `str`   | 缓存目录说明                  |
+顺序执行：
 
-#### check_model_available(model_id, backend="auto") → bool
+1. `transcribe_direct()`
+2. `transcribe_chunked()`
 
-检查模型是否已下载到本地缓存。
-
-- `model_id`：HF repo 路径或本地路径。
-- `backend`：`"mlx"` / `"faster_whisper"` / `"auto"`。`"auto"` 根据 model_id 前缀自动判断。
-- 分别检查 HF 缓存目录（`.safetensors` / `model.bin`）和本地目录。
-
-#### download_model(model_id, backend="auto", force=False) → bool
-
-从 HuggingFace 下载模型到本地缓存。
-
-- 使用 `huggingface_hub.snapshot_download()`。
-- MLX 模型自动过滤不需要的 `pytorch_model*`、`tf_model*` 等文件。
-- 依赖 `huggingface_hub`（`pip install huggingface_hub`）。
-
-#### resolve_model(model_id=None, language="ja", backend=None, auto_download=False) → ResolvedModel
-
-**这是阶段 2 模型选择的核心入口。** 自动完成平台检测 → 模型推荐 → 可用性检查 → 下载指引。
-
-所有参数均为可选：`resolve_model()` 不带参数即可获得当前平台最佳推荐。
-
-
-| 参数            | 类型   | 默认值  | 说明                             |
-| --------------- | ------ | ------- | -------------------------------- |
-| `model_id`      | `str   | None`   | `None`                           |
-| `language`      | `str`  | `"ja"`  | 音频语言，影响日语专用模型的推荐 |
-| `backend`       | `str   | None`   | `None`                           |
-| `auto_download` | `bool` | `False` | `True`=不可用时自动下载          |
-
-**`ResolvedModel` 数据类字段：**
-
-
-| 字段             | 类型                 | 说明                                      |
-| ---------------- | -------------------- | ----------------------------------------- |
-| `model_id`       | `str`                | 最终使用的模型 ID 或路径                  |
-| `backend`        | `str`                | `"mlx"` / `"faster_whisper"` / `"openai"` |
-| `available`      | `bool`               | 模型是否在本地可用                        |
-| `cache_path`     | `str                 | None`                                     |
-| `platform_info`  | `dict`               | `detect_platform()` 返回值                |
-| `recommendation` | `ModelRecommendation | None`                                     |
-| `notes`          | `list[str]`          | 额外指引/警告信息                         |
-
-**使用示例：**
-
-```python
-# 最简用法 — 自动选择最佳模型
-info = resolve_model(language="ja")
-print(info.model_id)    # "mlx-community/kotoba-whisper-v2.0-8bit" (Mac)
-print(info.available)   # True / False
-for note in info.notes: # 打印指引
-    print(note)
-
-# 指定模型
-info = resolve_model("mlx-community/whisper-large-v3-turbo")
-
-# 自定义本地路径
-info = resolve_model("~/models/my-whisper")
-
-# 自动下载
-info = resolve_model(auto_download=True)
-
-# 配合 Transcriber 使用
-from bmlsub import Transcriber
-t = Transcriber(model=info.model_id, language="ja")
-t.transcribe_direct(audio_path)
-```
-
-#### list_cached_models() → list[str]
-
-列出本地已缓存的转录模型（扫描 HF 缓存目录）。
-
-#### print_model_guide(language="ja")
-
-打印完整的模型选择指引，包括：
-
-- 当前平台信息
-- 已缓存模型列表
-- 推荐模型详细信息（名称、后端、速度、精度、大小、安装命令）
-- 快速上手代码示例
-- 自定义路径说明
-
-```python
->>> print_model_guide(language="ja")
-============================================================
-📋 转录模型选择指引
-============================================================
-🖥️  当前平台:
-   系统: Darwin (arm64)
-   Apple Silicon: ✅ 是
-   推荐后端: MLX Whisper
-
-📦 已缓存模型 (2 个):
-   ✅ mlx-community/whisper-large-v3-turbo
-   ✅ mlx-community/kotoba-whisper-v2.0-8bit
-
-🎯 推荐模型 (语言: ja):
-  🥇 首选: kotoba-whisper-v2.0 (8bit)
-         模型: mlx-community/kotoba-whisper-v2.0-8bit
-         后端: mlx
-         速度: 快  |  精度: 最高  |  语言: 日语专用
-         大小: ~1.5 GB
-         安装: pip install mlx-whisper
-   ...
-============================================================
-```
-
----
-
-### transcribe.py — AI 转录
-
-```python
-from bmlsub import Transcriber, TranscriptionError, model_short_name
-```
-
-#### Transcriber
-
-**构造函数：`Transcriber(model, language, chunk_sec=240, overlap_sec=5, export_format="mp3", output_root="./output_transcripts")`**
-
-
-| 参数            | 类型  | 默认值                                   | 说明                     |
-| --------------- | ----- | ---------------------------------------- | ------------------------ |
-| `model`         | `str` | `"mlx-community/whisper-large-v3-turbo"` | 默认模型 HF 路径         |
-| `language`      | `str` | `"ja"`                                   | 音频语言代码             |
-| `chunk_sec`     | `int` | `240`                                    | 分割转录切片长度（秒）   |
-| `overlap_sec`   | `int` | `5`                                      | 相邻切片重叠秒数         |
-| `export_format` | `str` | `"mp3"`                                  | 切片导出音频格式         |
-| `output_root`   | `str  | Path`                                    | `"./output_transcripts"` |
-
-**`transcribe_direct(audio_path, model=None, output_path=None, force=False)` → `Path | None`：**
-
-- 方法 1 — 直接转录：整轨一次 `mlx_whisper.transcribe()`，速度快。
-- 输出格式：`{stem}_direct_{模型简称}.txt`。
-- 已存在文件默认跳过（`force=False`）。
-- 返回输出文件路径；异常抛出 `TranscriptionError`。
-
-**`transcribe_chunked(audio_path, model=None, manual_cuts=None, output_dir=None, force=False)` → `Path | None`：**
-
-- 方法 2 — 分割转录：音频分段 → 滑窗切片 → 逐片转录 → 合并。
-- 输出格式：`{stem}_chunked_{模型简称}_final.txt`。
-- `manual_cuts`：手动切点 `["MM:SS", ...]`，格式支持 `"MM:SS"` 或 `"HH:MM:SS"`。用于在 OP/ED 处切分，跳过歌曲段。
-- `output_dir`：工作目录（含切片和中间转录文件），`None` 自动创建 `output_transcripts/work_{stem}_{模型简称}/`。
-- 内部使用 `pydub.AudioSegment` 进行音频切分。
-
-**`transcribe_both(audio_path, fast_model, detailed_model, manual_cuts=None)` → `dict`：**
-
-- 依次执行两种转录：方法 1 用 `fast_model`，方法 2 用 `detailed_model`。
-- 单个方法失败不会中断另一个。
-- 返回 `{"direct": Path | None, "chunked": Path | None}`。
-
-**推荐模型选择：**
-
-
-| 模型                                     | 速度 | 精度 | 适用                       |
-| ---------------------------------------- | ---- | ---- | -------------------------- |
-| `mlx-community/whisper-large-v3-turbo`   | 快   | 高   | 直接转录首选               |
-| `mlx-community/whisper-medium-mlx`       | 中   | 中   | 分割转录（平衡速度与精度） |
-| `mlx-community/kotoba-whisper-v2.0-8bit` | 快   | 最高 | 日语专用                   |
-
-#### model_short_name()
-
-```python
-model_short_name("mlx-community/whisper-large-v3-turbo")
-# → "large-v3-turbo"
-```
-
----
-
-### encode.py — 视频编码
-
-```python
-from bmlsub import Encoder
-```
-
-#### Encoder
-
-**构造函数：`Encoder(hevc_preset=None, x264_preset=None)`**
-
-- `hevc_preset`：HEVC 编码预设，默认 `PRESET_HEVC_VT_DEFAULT`。
-- `x264_preset`：x264 编码预设，默认 `PRESET_X264_SLOW`。
-
-**`encode_hevc_vt(src, dst=None, audio_streams=None, strip_metadata=True)` → `Path`：**
-
-
-| 参数             | 类型       | 默认值   | 说明                                    |
-| ---------------- | ---------- | -------- | --------------------------------------- |
-| `src`            | `Path`     | （必需） | 源 MKV 文件                             |
-| `dst`            | `Path      | None`    | `None`（→ `{src.stem}_HEVC10bit.mkv`） |
-| `audio_streams`  | `list[int] | None`    | `None`（保留全部音轨）                  |
-| `strip_metadata` | `bool`     | `True`   | 编码后清理元数据                        |
-
-编码流程：
-
-1. ffmpeg HEVC VideoToolbox 编码（`-c:v hevc_videotoolbox -allow_sw 1 -profile:v main10 -pix_fmt p010le`）
-2. 覆盖前备份旧文件到 `_backup/`
-3. 编码完成后 `mkvpropedit --delete-track-statistics-tags` + `--tags all:` 深度清理
-
-**`encode_x264(src, dst, ass_subtitle=None, preset=None)` → `Path`：**
-
-
-| 参数           | 类型          | 默认值   | 说明                              |
-| -------------- | ------------- | -------- | --------------------------------- |
-| `src`          | `Path`        | （必需） | 源视频                            |
-| `dst`          | `Path`        | （必需） | 输出`.mp4` 路径                   |
-| `ass_subtitle` | `Path         | None`    | `None`                            |
-| `preset`       | `EncodePreset | None`    | `None`（使用 `self.x264_preset`） |
-
-**`strip_metadata(video_path)` → `Path`：**
-
-- 单独对已编码文件执行元数据深度清理。
-- 优先使用 `mkvpropedit`，不可用时回退到 `ffmpeg -c copy` 流拷贝。
-
-**`verify_metadata_clean(video_path)` → `dict`：**
-
-- 检查项包括 `_STATISTICS_*` 标签、`BPS`、`DURATION`、`NUMBER_OF_FRAMES`、`NUMBER_OF_BYTES`、`title`、`HANDLER_NAME`、`VENDOR_ID`。
-- 返回 `{"stream_0_video": ["_STATISTICS_WRITING_APP"], ...}` 或空 `dict`（干净）。
-
----
-
-### subtitle.py — 字幕校验
-
-```python
-from bmlsub import SubtitleValidator
-```
-
-#### SubtitleValidator
-
-**构造函数：`SubtitleValidator(standard=None)`**
-
-- `standard`：`SubtitleStandard` 实例，默认 `SUB_STANDARD_HD`（1920×1080, TV.709, v4.00+）。
-
-
-| 方法                                                       | 说明                                      | 返回类型         |
-| ---------------------------------------------------------- | ----------------------------------------- | ---------------- |
-| `check_subtitle_exists(episode_dir, episode_id, sub_type)` | 检查`{ep_id}.{sub_type}&jpn.ass` 是否存在 | `Path            |
-| `validate_for_episode(episode_dir, episode_id)`            | 单集完整校验（chs + cht）                 | `dict`           |
-| `validate_ass_header(ass_path)`                            | 检查 ASS 头部合规性                       | `dict[str, str]` |
-| `standardize_ass(ass_path, output_path=None)`              | 修正 ASS 头部                             | `Path`           |
-| `standardize_extracted_subs(episode_dir, episode_id)`      | 批量标准化原始提取字幕                    | `list[Path]`     |
-
-**`validate_ass_header(ass_path)` 详细说明：**
-
-- 解析 `[Script Info]` 段，对比 `SubtitleStandard.expected_header`。
-- 返回不合规字段字典：`{"PlayResX": "1280", "YCbCr Matrix": "(缺失)"}`。
-- 空 `dict` = 完全合规。
-
-**`standardize_ass(ass_path, output_path=None)` 详细说明：**
-
-- `output_path=None` 时覆盖原文件（先备份到 `_backup/`）。
-- 只修改 `[Script Info]` 段，不触碰 `[V4+ Styles]` 和 `[Events]`。
-
-**`validate_for_episode(episode_dir, episode_id)` 返回结构：**
+返回：
 
 ```python
 {
-    "chs": {"exists": bool, "path": Path|None, "header_ok": bool, "issues": list},
-    "cht": {"exists": bool, "path": Path|None, "header_ok": bool, "issues": list},
-    "all_ok": bool,
+    'direct': Path | None,
+    'chunked': Path | None,
 }
 ```
 
----
+### 内部方法
 
-### package.py — 封装
+- `_split_audio(audio_path, work_dir, manual_cuts)`：按时长与手动切点切片
+- `_transcribe_chunks(chunks, model_name, mlx_whisper)`：逐片转录
+- `_merge_chunks(work_dir, final_path)`：合并文本
+- `_safe_sort_key(f)`：chunk 文件排序
+- `_timestamp_to_ms(ts)`：`mm:ss` / `hh:mm:ss` 转毫秒
 
-```python
-from bmlsub import Packager, PackagingError
-```
-
-#### Packager
-
-**构造函数：`Packager(episode_dir, episode_id, config=None)`**
-
-
-| 参数          | 类型            | 说明               |
-| ------------- | --------------- | ------------------ |
-| `episode_dir` | `Path           | str`               |
-| `episode_id`  | `str`           | 集数编号，如`"01"` |
-| `config`      | `PipelineConfig | None`              |
-
-**`get_available_files()` → `dict`：**
-
-- 自动扫描目录匹配所有字幕/视频/字体文件。
-- 字幕匹配模式（按优先级）：`{stem}.chs&jpn.ass` → `{stem}.cht&jpn.ass` → `{stem}.chs.ass` → `{stem}.cht.ass` → `{stem}_sub_chi_*.ass` → `{stem}_sub_eng_*.ass` → `{stem}_sub_jpn_*.ass`
-- 字体匹配：`*.ttf`、`*.otf`、`*.ttc`。
-- 返回结构：
-  ```python
-  {
-      "pure_mkv": Path | None,    # {ep_id}.mkv
-      "hevc_mkv": Path | None,    # {ep_id}_HEVC10bit.mkv
-      "chs_sub": Path | None,     # 简体中文字幕
-      "cht_sub": Path | None,     # 繁体中文字幕
-      "eng_sub": Path | None,     # 英文字幕
-      "jpn_sub": Path | None,     # 日文字幕
-      "all_subs": list[Path],     # 所有匹配到的字幕
-      "fonts": list[Path],        # 所有字体文件
-  }
-  ```
-
-**`mkvmerge_package(output_template)` → `Path | None`：**
-
-- `output_template`：输出文件名模板，`"&&"` 会被替换为集数。
-- 例：`"[BML] Series [&&][HEVC-10bit][CHS&CHT&JP].mkv"`。
-- 自动检测字幕语言元数据（简中 → `default-track: yes`，繁中 → `default-track: no`）。
-- 自动附加全部字体文件（TTF/OTF/TTC）。
-
-**`ffmpeg_hardsub_encode(chs_template, cht_template)` → `list[Path]`：**
-
-- 对纯数字 MKV 烧录简/繁 ASS 硬字幕，输出两个 MP4。
-- `chs_template` / `cht_template`：输出文件名模板，`"&&"` 替换为集数。
-- 使用 `PipelineConfig.x264_preset` 的编码参数。
-
-**`package_all(mkv_tmpl, chs_tmpl, cht_tmpl)` → `list[Path]`：**
-
-- 一键执行 mkvmerge + ffmpeg 硬压。
-- 先校验字幕存在性，缺失的字幕对应步骤会被跳过。
-
----
-
-### torrent.py — 种子生成
+### 调用示例
 
 ```python
-from bmlsub import TorrentCreator, DEFAULT_TRACKERS
-```
-
-#### TorrentCreator
-
-**构造函数：`TorrentCreator(trackers=None, extra_trackers=None, piece_length=None, comment="", created_by="BML")`**
-
-
-| 参数             | 类型       | 默认值  | 说明                            |
-| ---------------- | ---------- | ------- | ------------------------------- |
-| `trackers`       | `list[str] | None`   | `None`（→ `DEFAULT_TRACKERS`） |
-| `extra_trackers` | `list[str] | None`   | `None`                          |
-| `piece_length`   | `int       | None`   | `None`（自动计算）              |
-| `comment`        | `str`      | `""`    | 种子注释                        |
-| `created_by`     | `str`      | `"BML"` | 创建者标识                      |
-
-**`create(src, dst=None, v1_only=False)` → `Path`：**
-
-
-| 参数      | 类型   | 说明                                                   |
-| --------- | ------ | ------------------------------------------------------ |
-| `src`     | `Path  | str`                                                   |
-| `dst`     | `Path  | str                                                    |
-| `v1_only` | `bool` | `True` = 仅 v1（兼容动漫花园）；`False` = v1+v2 hybrid |
-
-每个 tracker 分配独立 tier，确保 DHT/PEX 之外的 tracker 冗余。
-
-**`DEFAULT_TRACKERS`** — 42 个动漫 tracker，涵盖：
-
-- nyaa、bangumi、acgtracker、dmhy
-- openbittorrent、publicbt、opentrackr
-- 及各种动漫专用 tracker
-
-**分块大小自动计算：**
-
-
-| 源数据量        | 分块大小 | 约块数    |
-| --------------- | -------- | --------- |
-| < 64 MB         | 64 KB    | ≤ 1000   |
-| 64 MB – 512 MB | 256 KB   | 250–2000 |
-| 512 MB – 2 GB  | 1 MB     | 500–2000 |
-| 2 GB – 8 GB    | 4 MB     | 500–2000 |
-| ≥ 8 GB         | 8 MB     | ≥ 1000   |
-
----
-
-### transfer.py — 安全传输
-
-```python
-from bmlsub import Transfer, TransferError, SSHConnectionError, HashVerificationError, CrocTransferError
-```
-
-#### Transfer
-
-**构造函数：`Transfer(ssh_config=None, remote_dir="/opt/qb/downloads")`**
-
-- `ssh_config`：`{"host": str, "port": int, "user": str, "key_path": str}`。
-- `remote_dir`：远程目标目录。
-
-**`send_files(local_paths, verify=True, cleanup=True)` → `bool`：**
-
-完整传输流程，返回 `True` = 全部传输并校验通过。
-
-
-| 参数          | 类型      | 默认值 | 说明                      |
-| ------------- | --------- | ------ | ------------------------- |
-| `local_paths` | `list[str | Path]` | （必需）                  |
-| `verify`      | `bool`    | `True` | 是否执行远程 SHA-256 校验 |
-| `cleanup`     | `bool`    | `True` | 是否清理两端临时 tar.gz   |
-
-传输协议：
-
-1. **本地**：计算 SHA-256 → tar.gz 打包
-2. **croc**：加密 P2P 传输（通过 PTY 捕获随机暗号）
-3. **SSH**：远程 `croc receive`（10 分钟超时保护）
-4. **远程**：压缩包哈希校验 → 解压 → 逐文件哈希对账
-5. **清理**：自动清理两端临时文件
-
-**异常类：**
-
-- `TransferError`：通用传输异常
-- `SSHConnectionError`：SSH 连接失败
-- `HashVerificationError`：哈希校验不一致
-- `CrocTransferError`：croc 传输失败/暗号超时
-
----
-
-### r2upload.py — Cloudflare R2 上传
-
-```python
-from bmlsub import R2Uploader, R2UploadError
-```
-
-#### R2Uploader
-
-**类常量：**
-
-
-| 常量                  | 值    | 说明             |
-| --------------------- | ----- | ---------------- |
-| `MULTIPART_THRESHOLD` | 50 MB | 大于此值自动分片 |
-| `MULTIPART_CHUNKSIZE` | 50 MB | 每片大小         |
-| `MAX_CONCURRENCY`     | 3     | 最大并发分片数   |
-| `MAX_RETRIES`         | 3     | 失败重试次数     |
-
-**构造函数：`R2Uploader(account_id=None, access_key_id=None, secret_access_key=None, bucket_name=None, endpoint=None)`**
-
-所有参数均可 `None`，凭证从环境变量或配置文件读取。凭证优先级：**参数 > 环境变量 > `~/.config/bml/r2_config.json`**。
-
-环境变量对应关系：`R2_ACCOUNT_ID`、`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`、`R2_BUCKET_NAME`、`R2_ENDPOINT`。
-
-**`upload_file(local_path, remote_key=None, progress=True)` → `str`：**
-
-- 上传单个文件。小文件（< 50MB）单次 PUT，大文件 boto3 分片上传（带进度回调）。
-- 上传前计算 SHA-256 并记录到 `self._hashes`，供后续 `sync_to_server` 校验。
-
-**`upload_files(paths, remote_folder="", progress=True)` → `list[str]`：**
-
-- 批量上传，失败不中断。`remote_folder` 为 R2 目标路径前缀。
-
-**`sync_to_server(ssh_alias, remote_dir, r2_prefix="", delete_after=True)` → `bool`：**
-
-- 服务器端通过 `rclone sync` 从 R2 拉取 → 逐文件 SHA-256 校验 → 校验通过后删除 R2 文件。
-- 安全机制：无本地哈希记录 + `delete_after=True` → 拒绝删除。
-
-**`list_remote(prefix="")` → `list[str]`**：列出 R2 对象 key。
-
-**`delete_remote(key)` → `bool`**：删除单个 R2 对象。
-
----
-
-### seeder.py — 远程做种
-
-```python
-from bmlsub import RemoteSeeder, SeederError
-```
-
-#### RemoteSeeder
-
-**构造函数：`RemoteSeeder(ssh_alias, host=None, port=None, username=None, password=None, download_base=None)`**
-
-
-| 参数            | 类型  | 默认值   | 说明                        |
-| --------------- | ----- | -------- | --------------------------- |
-| `ssh_alias`     | `str` | （必需） | SSH 别名（`~/.ssh/config`） |
-| `host`          | `str  | None`    | `None`（→ `"localhost"`）  |
-| `port`          | `int  | None`    | `None`（→ `8081`）         |
-| `username`      | `str  | None`    | `None`（→ `"admin"`）      |
-| `password`      | `str  | None`    | `None`（→ `""`）           |
-| `download_base` | `str  | None`    | `None`（→ `""`）           |
-
-凭证优先级：**参数 > 环境变量（`QB_HOST`、`QB_PORT`、`QB_USERNAME`、`QB_PASSWORD`、`QB_DOWNLOAD_BASE`）> `~/.config/bml/qb_config.json`**
-
-**方法一览：**
-
-
-| 方法                                                                                | 说明                   | 返回类型          |
-| ----------------------------------------------------------------------------------- | ---------------------- | ----------------- |
-| `login()`                                                                           | 登录 qB Web API        | `bool`            |
-| `logout()`                                                                          | 登出并清理 cookie      | `bool`            |
-| `add_torrent(remote_torrent_path, save_path, skip_checking, paused)`                | 添加单个服务器上的种子 | `bool`            |
-| `add_torrents(remote_dir_or_paths, save_path, skip_checking, paused, glob_pattern)` | 批量添加               | `dict[str, bool]` |
-| `upload_and_seed(torrent_paths, remote_dir, save_path, skip_checking, paused)`      | SCP 上传 + 添加做种    | `dict[str, bool]` |
-
-**`add_torrent()` 参数：**
-
-
-| 参数                  | 类型   | 默认值  | 说明                              |
-| --------------------- | ------ | ------- | --------------------------------- |
-| `remote_torrent_path` | `str   | Path`   | （必需）                          |
-| `save_path`           | `str   | None`   | `None`（→ `self.download_base`） |
-| `skip_checking`       | `bool` | `True`  | 跳过哈希校验                      |
-| `paused`              | `bool` | `False` | `True` = 暂停状态添加             |
-
-**`add_torrents()` 参数：**
-
-- `remote_dir_or_paths`：目录（自动 `find *.torrent`）或文件路径列表。含 `.` 的文件名视为文件路径。
-- `glob_pattern`：`"*.torrent"`，目录模式下查找种子文件的模式。
-
-**`upload_and_seed()` 参数：**
-
-- `torrent_paths`：本地 `.torrent` 文件路径列表。
-- `remote_dir`：SCP 目标目录，默认 `self.download_base`。
-
-**上下文管理器：**
-
-```python
-with RemoteSeeder(ssh_alias="my-server") as seeder:
-    seeder.add_torrents(...)
-# 自动 login/logout
+transcriber = Transcriber(language='ja')
+res = transcriber.transcribe_both(
+    Path('01_audio_jpn_1.aac'),
+    manual_cuts=['01:30', '22:00'],
+)
+print(res)
 ```
 
 ---
 
-### publish.py — API 发布
+# 7.5 `encode.py`
+
+负责 HEVC / x264 编码与元数据清理。
+
+## `Encoder`
+
+### `__init__(hevc_preset=None, x264_preset=None)`
+
+参数：
+
+- `hevc_preset`：HEVC 使用的 `EncodePreset`
+- `x264_preset`：x264 使用的 `EncodePreset`
+
+### `encode_hevc_vt(src, dst=None, audio_streams=None, strip_metadata=True)`
 
 ```python
-from bmlsub import Publisher, PublishError
+encoder.encode_hevc_vt(
+    src: Path,
+    dst: Path | None = None,
+    audio_streams: list[int] | None = None,
+    strip_metadata: bool = True,
+) -> Path
 ```
 
-#### Publisher
+用途：使用 macOS VideoToolbox 做 HEVC 10bit 编码。
 
-**`Publisher.publish_anibt(bgm_id, title, episode_key, torrent_path=None, magnet_base64=None, *, resolution, languages, subtitle, fmt, file_size, notes, trackers, token, api_url, use_torrent_file)` → `dict`：**
+参数：
 
-完整参数列表见阶段 12 文档。
+- `src`：源视频
+- `dst`：输出路径，默认 `{src.stem}_HEVC10bit.mkv`
+- `audio_streams`：仅保留指定音轨索引；不传则保留全部音轨
+- `strip_metadata`：编码后是否清理元数据
 
-两种发布方式：
+### `encode_x264(src, dst, ass_subtitle=None, preset=None)`
 
-- **方式一（JSON + magnet）**：传入 `torrent_path`（自动提取 info_hash/magnet）或 `magnet_base64`，以 JSON body POST。
-- **方式二（上传 .torrent 文件）**：传入 `torrent_path` + `use_torrent_file=True`，以 `multipart/form-data` POST。
+用途：x264 软件编码，可选烧录 ASS 字幕。
 
-**`Publisher.seed_qbittorrent(host, files, torrent_base_dir=None, download_base="/downloads", username="admin", password="")` → `dict[str, bool]`：**
+参数：
 
-- 使用 `qbittorrentapi` 库直接连接 qBittorrent Web API。
-- `host`：`"ip:port"` 格式。
-- `torrent_base_dir`：`.torrent` 文件目录，默认与视频同目录。
+- `src`：源视频
+- `dst`：输出 MP4
+- `ass_subtitle`：要烧录的 ASS 路径
+- `preset`：覆盖默认 x264 预设
+
+### `strip_metadata(video_path)`
+
+优先使用 `mkvpropedit` 深度清理；失败时回退到 `ffmpeg` 流拷贝方式。
+
+### `verify_metadata_clean(video_path)`
+
+返回剩余潜在源泄漏标签的报告字典，空字典表示基本干净。
+
+### 调用示例
+
+```python
+encoder = Encoder()
+hevc = encoder.encode_hevc_vt(Path('01.mkv'))
+mp4 = encoder.encode_x264(Path('01.mkv'), Path('01.mp4'), ass_subtitle=Path('01.chs&jpn.ass'))
+print(encoder.verify_metadata_clean(hevc))
+```
 
 ---
 
-### pipeline.py — 流水线编排
+# 7.6 `subtitle.py`
+
+负责 ASS 字幕校验、标准化与简繁转换。
+
+## `SubtitleValidator`
+
+### `__init__(standard=None, config=None)`
+
+参数：
+
+- `standard`：字幕头规范，默认 `SUB_STANDARD_HD`
+- `config`：流水线配置
+
+### `check_subtitle_exists(episode_dir, episode_id, sub_type, chs_subtitle=None, cht_subtitle=None)`
+
+返回指定类型字幕路径或 `None`。如果传入 `chs_subtitle` / `cht_subtitle`，优先使用显式覆盖路径。
+
+### `validate_for_episode(episode_dir, episode_id, chs_subtitle=None, cht_subtitle=None)`
+
+返回单集字幕校验结果：
+
+- 是否有 `chs`
+- 是否有 `cht`
+- 头是否合规
+- 全部字幕文件列表
+
+### `validate_ass_header(ass_path)`
 
 ```python
-from bmlsub import Pipeline
+validator.validate_ass_header(ass_path: Path) -> dict[str, str]
 ```
 
-#### Pipeline
+返回违反规范的头字段。
 
-**构造函数：`Pipeline(config=None, **kwargs)`**
+### `standardize_ass(ass_path, output_path=None)`
 
-- `config`：`PipelineConfig` 实例。`None` 时用 `**kwargs` 构造 `PipelineConfig`。
-- 所有子模块（`MediaExtractor`、`Transcriber`、`Encoder`、`SubtitleValidator`）延迟初始化。
+用途：把字幕头修正到标准格式。  
+如果 `output_path is None`，则原地修改并先备份旧文件。
 
-**主要方法：**
+### `standardize_extracted_subs(episode_dir, episode_id, source_video=None, chs_subtitle=None, cht_subtitle=None)`
 
+仅处理提取出来的 `*_sub_*.ass`。这里的 override 参数主要用于与单集上下文保持一致。
 
-| 方法                                                                                    | 说明                               |
-| --------------------------------------------------------------------------------------- | ---------------------------------- |
-| `extract_media(episode_dir, episodes, smart_subs)`                                      | 阶段 1：提取音轨+字幕              |
-| `transcribe_episode(episode_dir, episode_id, direct_model, chunked_model, manual_cuts)` | 阶段 2：AI 转录                    |
-| `encode_episode(episode_dir, episode_id)`                                               | 阶段 3：HEVC 编码                  |
-| `encode_hevc_batch(episode_dir, episodes)`                                              | 批量 HEVC 编码                     |
-| `validate_subtitles(episode_dir, episode_id)`                                           | 阶段 4：字幕校验                   |
-| `package_episode(episode_dir, episode_id, mkv_template, chs_template, cht_template)`    | 阶段 5：封装                       |
-| `transfer_files(file_paths, ssh_config, remote_dir)`                                    | 阶段 6：croc+SSH 传输              |
-| `seed_torrents(files, qb_host, qb_user, qb_pass, download_base)`                        | 阶段 7：qB 做种                    |
-| `process_episode(episode_dir, episode_id, ...)`                                         | 一键全流程（支持 skip_* 跳过阶段） |
+### `convert_chs_to_cht(chs_path, output_path=None, *, converter=None, api_url=None, timeout=None, backup_existing=True)`
 
-**`process_episode()` 完整参数：**
+用途：调用内置繁化姬 API，把简体字幕转换成繁体字幕。  
+默认使用 `PipelineConfig.subtitle_conversion` 中的设置，即：
 
+- API：`https://api.zhconvert.org/convert`
+- 转换模式：`Taiwan`
 
-| 参数              | 类型   | 默认值                | 说明               |
-| ----------------- | ------ | --------------------- | ------------------ |
-| `episode_dir`     | `Path  | str`                  | （必需）           |
-| `episode_id`      | `str   | None`                 | `None`（自动推断） |
-| `manual_cuts`     | `dict  | None`                 | `None`             |
-| `direct_model`    | `str   | None`                 | `None`             |
-| `chunked_model`   | `str   | None`                 | `None`             |
-| `mkv_template`    | `str   | None`                 | `None`             |
-| `chs_template`    | `str   | None`                 | `None`             |
-| `cht_template`    | `str   | None`                 | `None`             |
-| `ssh_config`      | `dict  | None`                 | `None`             |
-| `remote_dir`      | `str`  | `"/opt/qb/downloads"` | 远程目录           |
-| `qb_host`         | `str   | None`                 | `None`             |
-| `skip_transcribe` | `bool` | `False`               | 跳过转录           |
-| `skip_encode`     | `bool` | `False`               | 跳过编码           |
-| `skip_package`    | `bool` | `False`               | 跳过封装           |
-| `skip_transfer`   | `bool` | `False`               | 跳过传输           |
-| `skip_seed`       | `bool` | `False`               | 跳过做种           |
+如果 `output_path` 为空，会自动把 `*.chs&jpn.ass` / `*.chs.ass` 推导为对应的 `*.cht&jpn.ass` / `*.cht.ass`。
+
+### `ensure_episode_subtitles(episode_dir, episode_id, ..., converter=None, api_url=None, timeout=None, regenerate_cht=None, standardize=True)`
+
+用途：按工作流规则确保单集字幕状态正确：
+
+- 只有简体时：自动生成繁体
+- 简繁同时存在时：默认把旧繁体移到 `_backup/`，再以简体重建繁体
+- 只有繁体时：跳过繁化，仅校验现有繁体
+
+返回结果包含：
+
+- `chs`
+- `cht`
+- `generated_cht`
+- `backed_up`
+- `validated`
+- `standardized`
+- `missing`
+- `all_ok`
+
+### `derive_cht_path(chs_path)`
+
+根据简体字幕路径自动推导默认繁体字幕路径。
+
+### `move_to_backup(path, backup_dir=None)`
+
+把旧字幕移动到备份目录，默认目录名来自 `subtitle_conversion.backup_dir_name`。
+
+### `_parse_ass_header(ass_path)`
+
+内部方法，用于解析 `[Script Info]` 段。
+
+### 调用示例
+
+```python
+validator = SubtitleValidator()
+issues = validator.validate_ass_header(Path('01.chs&jpn.ass'))
+if issues:
+    validator.standardize_ass(Path('01.chs&jpn.ass'))
+```
 
 ---
 
-### progress.py — 进度 & 计时
+# 7.7 `package.py`
 
-```python
-from bmlsub import ProgressBar, SpeedMeter, StageTimer, PipelineTimer
-```
+负责产物封装：MP4 硬压 + MKV 内封。
 
-#### SpeedMeter — 滑动窗口网速计
+## `PackagingError`
 
-**构造函数：`SpeedMeter(window_sec=5.0)`**
+封装异常。
 
-- `window_sec`：速度计算的滑动窗口时长（秒）。
+## `PackagingPlan`
 
+描述当前集是否满足封装条件。
 
-| 属性             | 类型    | 说明                                      |
-| ---------------- | ------- | ----------------------------------------- |
-| `.speed`         | `float` | 当前窗口内速度 (bytes/sec)                |
-| `.avg_speed`     | `float` | 全程平均速度 (bytes/sec)                  |
-| `.speed_str`     | `str`   | 当前速度的人类可读字符串，如`"12.5 MB/s"` |
-| `.avg_speed_str` | `str`   | 平均速度的人类可读字符串                  |
-| `.total_str`     | `str`   | 已传输总量的人类可读字符串                |
-| `.elapsed`       | `float` | 已耗时（秒）                              |
-| `.elapsed_str`   | `str`   | 已耗时的人类可读字符串                    |
+### 字段
 
+- `episode_id`
+- `pure_mkv`
+- `hevc_mkv`
+- `chs_sub`
+- `cht_sub`
+- `fonts`
+- `mkv_output`
+- `mp4_chs_output`
+- `mp4_cht_output`
+- `missing_for_mkv`
+- `missing_for_mp4`
 
-| 方法           | 说明           |
-| -------------- | -------------- |
-| `add_bytes(n)` | 记录新增字节数 |
-| `reset()`      | 重置计数器     |
+### `has_mkv_inputs`
 
-#### ProgressBar — 通用进度条
+是否满足 MKV 内封输入条件。
 
-封装 tqdm，自动显示百分比、速度、ETA。
+### `has_mp4_inputs`
 
-**构造函数：`ProgressBar(label, total, unit="B", show_speed=True, show_eta=True, bar_format=None)`**
+是否满足 MP4 硬压输入条件。
 
-- `label`：进度条标签。
-- `total`：总量（字节数/帧数/百分比）。
-- `unit`：单位，`"B"` 自动换算。
-- `show_speed`：显示网速。
-- `show_eta`：显示预计剩余时间。
+### `summary()`
 
-**工厂方法：**
-
-- `ProgressBar.file_upload(filename, total_bytes)` — 文件上传进度条
-- `ProgressBar.file_download(filename, total_bytes)` — 文件下载进度条
-- `ProgressBar.encode(filename, duration_sec)` — 编码进度条
-
-**上下文管理器支持：**
-
-```python
-with ProgressBar("Encoding", total=100) as bar:
-    for i in range(100):
-        bar.update(1)
-```
-
-#### StageTimer — 阶段计时器
-
-记录单个阶段的开始、结束和耗时。
-
-**属性：**`.name`、`.elapsed`、`.elapsed_str`、`.is_done`
-
-**方法：**`start()`、`stop()`、`add_bytes(n)`
-
-#### PipelineTimer — 流水线时间轴
-
-追踪所有阶段的耗时，最后打印时间轴总览。
-
-**构造函数：`PipelineTimer(label="")`**
-
-```python
-timer = PipelineTimer("EP01")
-with timer.stage("1.提取音轨"):
-    extract_audio()
-with timer.stage("2.HEVC 编码"):
-    encode_hevc()
-timer.summary()
-# ─── 流水线时间轴 [EP01] ───
-#    1. ✅ 1.提取音轨          3.2s  [██░░░░]   5.1%
-#    2. ✅ 2.HEVC 编码        58.4s  [██████]  93.8%
-#                      总计: 1m2s
-```
-
-**方法：**
-
-- `stage(name)` — 上下文管理器，自动开始/结束阶段。
-- `stage_start(name)` — 手动开始（需调用 `.stop()`）。
-- `summary(width=50)` — 打印时间轴总览。
+返回计划摘要。
 
 ---
 
-### _backup.py — 自动备份
+## `Packager`
+
+### `__init__(episode_dir, episode_id, config=None, source_video=None, chs_subtitle=None, cht_subtitle=None)`
+
+设置单集工作目录、集号和配置，并允许显式指定输入视频 / 字幕。
+
+### `context()`
+
+返回当前集的 `EpisodeFiles`。
+
+### `get_available_files()`
+
+统一返回：
+
+- `pure_mkv`
+- `hevc_mkv`
+- `chs_sub`
+- `cht_sub`
+- `eng_sub`
+- `jpn_sub`
+- `all_subs`
+- `fonts`
+- `context`
+
+### `build_plan(prefix_chs=None, prefix_cht=None, project=None)`
+
+构造 `PackagingPlan`。
+
+参数：
+
+- `prefix_chs` / `prefix_cht`：覆盖输出前缀
+- `project`：命名配置
+
+### `mkvmerge_package(output_template=None, output_path=None)`
+
+用途：把 HEVC 视频、简繁字幕和字体一起封成 MKV。
+
+参数：
+
+- `output_template`：模板形式的输出名
+- `output_path`：直接给定完整输出路径
+
+注意：
+
+- 必须有 `HEVC10bit.mkv`
+- 必须同时有简繁字幕
+- 必须有字体
+
+### `ffmpeg_hardsub_encode(chs_template=None, cht_template=None, chs_output=None, cht_output=None)`
+
+用途：对原始视频分别烧录简中 / 繁中字幕并输出 MP4。
+
+参数：
+
+- `chs_template` / `cht_template`：模板名
+- `chs_output` / `cht_output`：直接输出路径
+
+返回：
+
+- `list[Path]`
+
+### `package_expected(prefix_chs=None, prefix_cht=None, project=None)`
+
+按照 `EpisodeFiles.expected_products` 的默认命名进行封装。  
+推荐在新版工作流中优先使用。
+
+### `package_all(mkv_tmpl, chs_tmpl, cht_tmpl)`
+
+旧式模板驱动封装入口：
+
+- `mkv_tmpl`
+- `chs_tmpl`
+- `cht_tmpl`
+
+### 内部方法
+
+- `_resolve_output_path(output_template=None, output_path=None)`
+- `_backup_output(output_path, label)`
+- `_detect_subtitle_meta(sub_type)`
+- `_detect_font_mime(font_path)`
+
+### 调用示例
 
 ```python
-from bmlsub import backup_if_exists
+packager = Packager(
+    '/path/to/ep01',
+    '01',
+    source_video='raw_source_v2.mkv',
+    chs_subtitle='custom_chs.ass',
+    cht_subtitle='custom_cht.ass',
+)
+plan = packager.build_plan()
+print(plan.summary())
+files = packager.package_expected()
+print(files)
 ```
-
-#### backup_if_exists
-
-**`backup_if_exists(file_path, suffix=None)` → `Path | None`：**
-
-- `file_path`：要备份的文件路径。
-- `suffix`：自定义时间戳后缀，`None` = 自动生成 `YYYYMMDD_HHMMSS`。
-- 若文件存在 → 移动到 `_backup/` 目录，文件名加时间戳（如 `01_HEVC10bit_20260710_143000.mkv`）。
-- 若文件不存在 → 返回 `None`。
-
-所有模块在覆盖已有文件前（编码、封装、种子生成等）都会自动调用此函数，确保旧文件不会丢失。
 
 ---
 
-## 凭证配置
+# 7.8 `r2upload.py`
 
-所有凭证按优先级：**构造函数参数 > 环境变量 > `~/.config/bml/*.json`**
+负责 Cloudflare R2 上传。
 
-### R2 (`~/.config/bml/r2_config.json`)
+## `R2UploadError`
 
-```json
+R2 上传异常。
+
+## `R2Uploader`
+
+### `__init__(account_id=None, access_key_id=None, secret_access_key=None, bucket_name=None, endpoint=None)`
+
+凭证来源优先级：
+
+1. 构造参数
+2. 环境变量
+3. `~/.config/bml/r2_config.json`
+
+支持的环境变量：
+
+- `R2_ACCOUNT_ID`
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
+- `R2_BUCKET_NAME`
+- `R2_ENDPOINT`
+
+### `upload_file(local_path, remote_key=None, progress=True)`
+
+```python
+uploader.upload_file(
+    local_path: str | Path,
+    remote_key: str | None = None,
+    progress: bool = True,
+) -> str
+```
+
+参数：
+
+- `local_path`：本地文件路径
+- `remote_key`：远端对象 key；不传时会按本地文件名生成
+- `progress`：是否打印日志
+
+返回：
+
+- 最终上传的远端 key
+
+### `upload_files(paths, remote_folder='', progress=True)`
+
+批量上传多个文件。  
+每个文件的 key 为：`remote_folder + '/' + 文件名`。
+
+### `list_remote(prefix='')`
+
+列出远端指定前缀下所有 key。
+
+### `delete_remote(key)`
+
+删除远端对象。
+
+### `recorded_hashes()`
+
+返回当前 uploader 进程中记录的本地 SHA256 映射。
+
+### 内部方法
+
+- `_load_config(...)`
+- `_upload_small(local_path, remote_key)`
+- `_upload_large(local_path, remote_key)`
+- `_sha256_local(file_path)`
+
+### 调用示例
+
+```python
+uploader = R2Uploader(bucket_name='bml-releases')
+key = uploader.upload_file('01_HEVC10bit.mkv', '作品名/01/01_HEVC10bit.mkv')
+print(key)
+
+uploaded = uploader.upload_files(
+    ['01_HEVC10bit.mkv', '01.mp4'],
+    remote_folder='作品名/01',
+)
+print(uploaded)
+```
+
+---
+
+# 7.9 `torrent.py`
+
+负责 `.torrent` 计划、创建和磁力读取。
+
+## 常量
+
+### `DEFAULT_TRACKERS`
+
+默认 tracker 列表。
+
+## 数据类
+
+### `TorrentMetadata`
+
+字段：
+
+- `name`
+- `info_hash_v1`
+- `info_hash_v2`
+- `trackers`
+- `magnet_uri`
+
+### `TorrentPlan`
+
+字段：
+
+- `src`
+- `dst`
+- `piece_size`
+- `v1_only`
+- `tracker_count`
+
+方法：`summary()`
+
+### `TorrentBatchPlan`
+
+字段：
+
+- `plans`
+
+方法：`summary()`
+
+---
+
+## `read_torrent_metadata(torrent_path)`
+
+```python
+read_torrent_metadata(torrent_path: Path | str) -> TorrentMetadata
+```
+
+用途：读取本地 `.torrent` 并生成标准磁力链接。
+
+---
+
+## `TorrentCreator`
+
+### `__init__(trackers=None, extra_trackers=None, piece_length=None, comment='', created_by='BML')`
+
+参数：
+
+- `trackers`：完全覆盖默认 tracker 列表
+- `extra_trackers`：附加 tracker
+- `piece_length`：手工分块大小
+- `comment`：种子注释
+- `created_by`：种子创建者标记
+
+### `build_plan(src, dst=None, v1_only=False)`
+
+生成单个种子计划。
+
+### `build_batch_plan(sources, v1_only=False)`
+
+批量生成计划。
+
+### `create(src, dst=None, v1_only=False)`
+
+真正生成 `.torrent`。
+
+### `create_many(sources, v1_only=False)`
+
+批量生成多个种子。
+
+### 内部方法
+
+- `_estimate_piece_size(src)`
+- `_calc_piece_size(total_bytes)`
+- `_num_pieces_str(src, piece_size)`
+- `_total_size(src)`
+
+### 调用示例
+
+```python
+creator = TorrentCreator()
+plan = creator.build_plan('/path/to/release_dir', v1_only=True)
+print(plan.summary())
+
+torrent_path = creator.create('/path/to/release_dir', v1_only=True)
+meta = read_torrent_metadata(torrent_path)
+print(meta.magnet_uri)
+```
+
+---
+
+# 7.10 `publish.py`
+
+负责本地 qBittorrent 做种辅助与 anibt 发布。
+
+## `PublishError`
+
+发布异常。
+
+## `ReleasePlan`
+
+字段：
+
+- `title`
+- `episode_key`
+- `torrent_path`
+- `resolution`
+- `languages`
+- `fmt`
+- `subtitle`
+- `mode`
+
+方法：`summary()`
+
+---
+
+## `Publisher`
+
+### `seed_qbittorrent(host, files, torrent_base_dir=None, download_base='/downloads', username='admin', password='')`
+
+参数：
+
+- `host`：qBittorrent 地址
+- `files`：成品文件路径列表；代码会寻找同名 `.torrent`
+- `torrent_base_dir`：若种子不在成品目录，可指定基目录
+- `download_base`：保存路径
+- `username` / `password`：登录凭据
+
+返回：
+
+- `dict[str, bool]`，键为文件名，值为是否添加成功
+
+### `build_release_plan(title, episode_key, torrent_path, resolution='1080p', languages=None, subtitle='INTERNAL', fmt='MKV', use_torrent_file=False)`
+
+用途：构造发布计划对象，不发请求。
+
+### `publish_anibt(...)`
+
+```python
+Publisher.publish_anibt(
+    bgm_id: int,
+    title: str,
+    episode_key: str,
+    torrent_path: str | Path | None = None,
+    magnet_base64: str | None = None,
+    *,
+    resolution: str = '1080p',
+    languages: list[str] | None = None,
+    subtitle: str = 'INTERNAL',
+    fmt: str = 'MKV',
+    file_size: int | None = None,
+    notes: str = '',
+    trackers: list[str] | None = None,
+    token: str | None = None,
+    api_url: str | None = None,
+    use_torrent_file: bool = False,
+) -> dict
+```
+
+参数重点：
+
+- `bgm_id`：Bangumi / 站点 ID
+- `title`：标题
+- `episode_key`：集号标识
+- `torrent_path`：本地种子路径
+- `magnet_base64`：若已有 base64 磁力，可直接传
+- `languages`：语言列表
+- `token`：API Token
+- `api_url`：API 地址
+- `use_torrent_file`：是否改为 multipart 上传 `.torrent`
+
+逻辑：
+
+1. 先加载 token / api_url
+2. 若给 `torrent_path`，则读取种子并构造 magnet
+3. 发 `requests.post()` 请求
+
+### 内部方法
+
+- `_build_magnet(info_hash, name, file_size, trackers)`
+- `_publish_torrent_file(...)`
+- `_read_torrent_info(torrent_path)`
+- `_load_anibt_config(token=None, api_url=None)`
+
+### 配置来源
+
+- 参数
+- 环境变量：`ANIBT_TOKEN`、`ANIBT_API_URL`
+- `~/.config/bml/anibt_config.json`
+
+---
+
+# 7.11 `model_utils.py`
+
+负责平台检测、推荐模型、模型缓存检查与下载。
+
+## 数据类
+
+### `ModelRecommendation`
+
+字段：
+
+- `model_id`
+- `backend`
+- `name`
+- `description`
+- `speed`
+- `accuracy`
+- `lang_specialty`
+- `size_gb`
+- `install_cmd`
+- `cache_dir_help`
+
+### `ResolvedModel`
+
+字段：
+
+- `model_id`
+- `backend`
+- `available`
+- `cache_path`
+- `platform_info`
+- `recommendation`
+- `notes`
+
+---
+
+## 函数
+
+### `detect_platform()`
+
+返回平台信息字典。
+
+### `is_apple_silicon()`
+
+返回当前是否为 Apple Silicon macOS。
+
+### `get_recommended_models(language='ja')`
+
+按语言和平台返回推荐模型列表。
+
+### `_hf_cache_dir()`
+
+返回 Hugging Face 缓存目录。
+
+### `check_model_available(model_id, backend='auto')`
+
+检查某模型是否已缓存到本地。
+
+### `list_cached_models()`
+
+列出本地已缓存模型。
+
+### `download_model(model_id, backend='auto', force=False)`
+
+使用 `huggingface_hub.snapshot_download` 下载模型。
+
+### `resolve_model(model_id=None, language='ja', backend=None, auto_download=False)`
+
+综合平台、推荐项和缓存状态，返回 `ResolvedModel`。
+
+### `print_model_guide(language='ja')`
+
+打印推荐模型说明。
+
+### 调用示例
+
+```python
+from bmlsub import print_model_guide, resolve_model
+
+print_model_guide(language='ja')
+info = resolve_model(language='ja', auto_download=False)
+print(info)
+```
+
+---
+
+# 7.12 `pipeline.py`
+
+这是整个项目最重要的编排模块。
+
+## 数据类
+
+### `StageStatus`
+
+字段：
+
+- `name`
+- `ready`
+- `missing`
+- `outputs`
+- `notes`
+
+方法：`summary()`
+
+### `EpisodeStagePlan`
+
+字段：
+
+- `episode_id`
+- `inspect`
+- `extract_subtitles`
+- `extract_audio`
+- `transcribe`
+- `encode_hevc`
+- `validate_subtitles`
+- `package`
+
+方法：`summary()`
+
+### `WorkstationStage0Summary`
+
+字段：
+
+- `workstation`
+- `stage0`
+
+方法：`summary()`
+
+### `WorkstationBatchResult`
+
+字段：
+
+- `mode`
+- `stage`
+- `ok`
+- `items`
+- `missing`
+- `outputs`
+- `notes`
+
+方法：`summary()`
+
+---
+
+## `Pipeline`
+
+### `__init__(config=None, **kwargs)`
+
+参数：
+
+- `config`：完整 `PipelineConfig`
+- `**kwargs`：未传 `config` 时可直接传入 `PipelineConfig` 字段
+
+### 懒加载属性
+
+- `extractor`
+- `transcriber`
+- `encoder`
+- `validator`
+
+这些属性会按需创建对应对象。
+
+### `context(episode_dir, episode_id=None, prefix_chs=None, prefix_cht=None, project=None, source_video=None, chs_subtitle=None, cht_subtitle=None)`
+
+返回单集 `EpisodeFiles` 对象。显式输入覆盖只改变输入定位，不改变 `episode_id` 驱动的输出命名。
+
+### `inspect_episode(...)`
+
+返回单集资源摘要字典，适合最早期检查。
+
+### `plan_episode(...)`
+
+返回 `EpisodeStagePlan`，显示每一步是否 ready、缺什么、会输出什么。
+
+### `build_workstation(root_dir, episode_ids=None, **kwargs)`
+
+快捷构造 `WorkstationConfig`。
+
+### `inspect_workstation(workstation, **kwargs)`
+
+返回 `WorkstationStage0Summary`，用于合集 stage0 检查。
+
+### `plan_workstation(workstation, **kwargs)`
+
+按集汇总 `plan_episode()` 结果。
+
+### `extract_subtitles(episode_dir, episode_id, smart=False, source_video=None, chs_subtitle=None, cht_subtitle=None)`
+
+参数：
+
+- `smart=False`：`False` 时提取全部字幕轨，`True` 时按优先语言筛选
+- `source_video`：显式指定输入视频路径
+- `chs_subtitle` / `cht_subtitle`：保留给统一上下文；提取阶段本身主要使用 `source_video`
+
+注意：提取出的字幕文件仍按 `episode_id` 生成 `01_sub_*.ass` 这类名字。
+
+返回：
+
+```python
 {
-    "account_id": "...",
-    "access_key_id": "...",
-    "secret_access_key": "...",
-    "bucket_name": "bml",
-    "endpoint": "https://<account_id>.r2.cloudflarestorage.com"
+    'ok': bool,
+    'missing': list[str],
+    'tracks': list[str],
 }
 ```
 
-环境变量：`R2_ACCOUNT_ID` `R2_ACCESS_KEY_ID` `R2_SECRET_ACCESS_KEY` `R2_BUCKET_NAME` `R2_ENDPOINT`
+### `extract_audio(episode_dir, episode_id, source_video=None, chs_subtitle=None, cht_subtitle=None)`
 
-### qBittorrent (`~/.config/bml/qb_config.json`)
+返回结构与 `extract_subtitles()` 类似。
 
-```json
+注意：即使 `source_video='raw_source_v2.mkv'`，输出音轨仍会按 `episode_id` 命名，例如 `01_audio_jpn_1.aac`。
+
+### `extract_media(episode_dir=None, episodes=None, smart_subs=True)`
+
+对目录中的多个 MKV 批量提取音轨与字幕。
+
+### `validate_workstation_subtitles(workstation, **kwargs)`
+
+合集模式批量字幕检查。
+
+说明：
+
+- 会按 `ws.effective_episode_ids` 逐集复用 `validate_subtitles()`
+- 当前主流程默认等价于普通字幕头校验 / 标准化
+- 如果你希望合集模式同时做“缺繁体自动生成 / 简体重建繁体”，可以显式遍历每一集并调用：
+
+```python
+for ep_id in ws.effective_episode_ids:
+    result = pipe.validate_subtitles(
+        pipe._single_episode_dir(ws, ep_id),
+        ep_id,
+        ensure_cht=True,
+    )
+    print(ep_id, result)
+```
+
+也就是说：**v2 已支持合集模式，简繁转换能力也可用于合集，只是当前 `validate_workstation_subtitles()` 还没有把 `ensure_cht=True` 设为默认行为。**
+
+### `encode_workstation_hevc(workstation, **kwargs)`
+
+合集模式按规划路径生成 HEVC 输出计划项。
+
+### `build_release_batch(workstation, **kwargs)`
+
+按合集发布目录构造整体种子计划。
+
+### `transcribe_episode(episode_dir, episode_id, direct_model=None, chunked_model=None, manual_cuts=None, source_video=None, chs_subtitle=None, cht_subtitle=None)`
+
+参数：
+
+- `direct_model`：覆盖快速模型
+- `chunked_model`：覆盖精细模型
+- `manual_cuts`：切点列表
+- `source_video` / `chs_subtitle` / `cht_subtitle`：与单集上下文保持一致；转录阶段主要消费已提取的 `episode_id_audio_*.aac`
+
+返回：
+
+```python
 {
-    "host": "localhost",
-    "port": 8081,
-    "username": "admin",
-    "password": "...",
-    "download_base": "/path/to/downloads"
+    'ok': bool,
+    'missing': list[str],
+    'direct': Path | None,
+    'chunked': Path | None,
 }
 ```
 
-环境变量：`QB_HOST` `QB_PORT` `QB_USERNAME` `QB_PASSWORD` `QB_DOWNLOAD_BASE`
+### `encode_episode(episode_dir, episode_id, source_video=None, chs_subtitle=None, cht_subtitle=None)`
 
-### anibt.net (`~/.config/bml/anibt_config.json`)
+返回 HEVC 输出路径。
 
-```json
+注意：即使输入视频不是 `01.mkv`，HEVC 输出仍固定为 `01_HEVC10bit.mkv`。
+
+### `validate_subtitles(episode_dir, episode_id, source_video=None, chs_subtitle=None, cht_subtitle=None, ensure_cht=False, converter=None, api_url=None, timeout=None, regenerate_cht=None)`
+
+返回：
+
+- `all_ok`
+- `standardized`
+- `missing`
+- `generated_cht`（当 `ensure_cht=True` 且发生生成时）
+- `backed_up`（当 `ensure_cht=True` 且旧繁体被移入备份时）
+- `validated`（当 `ensure_cht=True` 时）
+
+说明：
+
+- 默认行为仍是只做字幕头校验/标准化
+- 当 `ensure_cht=True` 时，会启用内置繁化姬流程
+- 默认 API 为 `https://api.zhconvert.org/convert`
+- 默认转换模式为 `Taiwan`
+
+### `package_episode(episode_dir, episode_id, mkv_template=None, chs_template=None, cht_template=None, prefix_chs=None, prefix_cht=None, project=None, source_video=None, chs_subtitle=None, cht_subtitle=None)`
+
+- 如果模板参数未全给，则走 `Packager.package_expected()`
+- 否则走 `Packager.package_all()`
+- 即使字幕文件名不是 `01.*.ass`，只要通过 `chs_subtitle` / `cht_subtitle` 显式传入，也仍然会按 `episode_id` 命名最终成品
+
+返回：
+
+- `list[Path]`
+
+### `upload_files_to_r2(file_paths, remote_folder='', uploader=None, **r2_kwargs)`
+
+参数：
+
+- `file_paths`：本地文件列表
+- `remote_folder`：远端目录前缀
+- `uploader`：复用已有 `R2Uploader`
+- `**r2_kwargs`：没有 `uploader` 时传给 `R2Uploader(...)`
+
+返回：
+
+```python
 {
-    "token": "...",
-    "api_url": "https://anibt.net/api/releases/publish"
+    'bucket_name': str,
+    'remote_folder': str,
+    'uploaded_keys': list[str],
 }
 ```
 
-环境变量：`ANIBT_TOKEN` `ANIBT_API_URL`
+### `seed_torrents(files, qb_host, qb_user='admin', qb_pass='', download_base='/downloads')`
+
+做种入口，内部调用 `Publisher.seed_qbittorrent()`。
+
+### `process_episode(...)`
+
+```python
+pipe.process_episode(
+    episode_dir: Path | str,
+    episode_id: str | None = None,
+    manual_cuts: dict | None = None,
+    direct_model: str | None = None,
+    chunked_model: str | None = None,
+    mkv_template: str | None = None,
+    chs_template: str | None = None,
+    cht_template: str | None = None,
+    prefix_chs: str | None = None,
+    prefix_cht: str | None = None,
+    project: ProjectNaming | None = None,
+    r2_prefix: str | None = None,
+    r2_uploader: R2Uploader | None = None,
+    qb_host: str | None = None,
+    skip_transcribe: bool = False,
+    skip_encode: bool = False,
+    skip_package: bool = False,
+    skip_upload: bool = False,
+    skip_seed: bool = False,
+) -> dict
+```
+
+这是单集总入口。
+
+关键参数说明：
+
+- `episode_dir`：单集目录
+- `episode_id`：不传则自动推断
+- `manual_cuts`：`{'01': ['01:30', '22:00']}` 这种按集传切点
+- `direct_model` / `chunked_model`：覆盖默认转录模型
+- `mkv_template` / `chs_template` / `cht_template`：旧式模板封装
+- `prefix_chs` / `prefix_cht`：命名覆盖
+- `project`：项目命名对象
+- `source_video`：显式指定输入视频；传入时建议同时显式给 `episode_id`
+- `chs_subtitle` / `cht_subtitle`：显式指定简繁字幕路径
+- `r2_prefix`：R2 目录前缀
+- `r2_uploader`：已初始化的上传器
+- `qb_host`：若不为空且 `skip_seed=False`，则会进入做种
+- `skip_*`：逐阶段跳过开关
+
+阶段顺序：
+
+1. 素材提取（即使输入文件名自定义，提取结果仍按 `episode_id` 命名）
+2. AI 转录
+3. HEVC 编码（输出仍为 `episode_id_HEVC10bit.mkv`）
+4. 字幕校验
+5. 封装（最终成品名仍基于 `episode_id`）
+6. R2 上传
+7. 做种
+
+### 内部辅助
+
+- `_single_episode_dir(workstation, episode_id)`
+- `_normalize_workstation(workstation, **kwargs)`
+
+### 调用示例
+
+```python
+result = pipe.process_episode(
+    episode_dir='/path/to/ep01',
+    episode_id='01',
+    source_video='raw_source_v2.mkv',
+    chs_subtitle='custom_chs.ass',
+    cht_subtitle='custom_cht.ass',
+    project=project,
+    manual_cuts={'01': ['01:30', '22:00']},
+    r2_prefix='作品名/01',
+    skip_seed=True,
+)
+print(result)
+```
 
 ---
 
-## 常见问题
+# 7.13 `scan.py`
 
-**VideoToolbox 编码失败？**
-确保在 Mac 上运行，`ffmpeg -encoders | grep videotoolbox` 确认支持。非 Mac 环境请使用 `Encoder.encode_x264()`。
+负责最终产物路径计算与扫描。
 
-**种子格式选择？**
-anibt.net（动漫花园）兼容需要 `v1_only=True`。其他 tracker 可用默认的 v1+v2 hybrid。
+## `product_path(ep_dir, ep_id, product_key, prefix_chs, prefix_cht=None, config=None)`
 
-**R2 上传失败？**
-检查凭证文件 `~/.config/bml/r2_config.json` 存在且 API Token 有 Object Read & Write 权限。也确认 bucket 名称和 account_id 正确。
+根据命名模板推导成品路径。
 
-**mkvpropedit 不可用？**
-`Encoder.strip_metadata()` 会自动回退到 ffmpeg 流拷贝方式清理元数据。
+## `product_torrent_path(video_path)`
 
-**如何只运行部分阶段？**
-每个模块都独立可用，直接在 Python/Notebook 中 import 需要的模块即可。也可以使用 `Pipeline.process_episode()` 的 `skip_*` 参数跳过不需要的阶段。
+根据视频路径推导同名 `.torrent` 路径。
 
-**远程做种时 SSH 横幅污染？**
-`RemoteSeeder._parse_add_response()` 已内置 SSH MOTD 横幅过滤，自动从混入输出中提取 JSON 响应。
+## `check_products(ep_dir, ep_id, prefix_chs, prefix_cht=None, config=None)`
+
+检查当前集各类成品是否存在。
+
+## `scan_products(ep_dir, ep_id, prefix_chs, prefix_cht=None, config=None)`
+
+扫描并返回更完整的产物状态。
+
+这些函数多被 `EpisodeFiles.discover()` 间接调用。
+
+---
+
+# 7.14 `progress.py`
+
+负责显示速度、时间与阶段进度。
+
+## 工具函数
+
+### `_fmt_size(n_bytes)`
+
+字节转人类可读大小。
+
+### `_fmt_time(seconds)`
+
+秒数转可读时间。
+
+---
+
+## `SpeedMeter`
+
+方法：
+
+- `add_bytes(n)`
+- `speed()`
+- `avg_speed()`
+- `speed_str()`
+- `avg_speed_str()`
+- `total_str()`
+- `elapsed()`
+- `elapsed_str()`
+- `reset()`
+
+用于上传、下载、编码的速率显示。
+
+## `ProgressBar`
+
+### 构造参数
+
+- `label`
+- `total`
+- `unit='B'`
+- `show_speed=True`
+- `show_eta=True`
+- `bar_format=None`
+- `**kwargs`
+
+### 类方法
+
+- `file_upload(filename, total_bytes, unit='B')`
+- `file_download(filename, total_bytes, unit='B')`
+- `encode(filename, duration_sec, unit='frames')`
+
+### 实例方法
+
+- `update(n=1)`
+- `set_postfix(**kwargs)`
+- `speed_str()`
+- `elapsed_str()`
+- `close()`
+- `__enter__()` / `__exit__()`
+
+## `StageTimer`
+
+方法：
+
+- `elapsed()`
+- `elapsed_str()`
+- `is_done()`
+- `start()`
+- `stop()`
+- `add_bytes(n)`
+- `bytes_str()`
+
+## `PipelineTimer`
+
+方法：
+
+- `stage(name)`：上下文管理器方式记录阶段
+- `stage_start(name)`：手工开始阶段
+- `total_elapsed()`
+- `summary(width=50)`：打印整条流程耗时总览
+
+---
+
+# 7.15 `seeder.py`
+
+该模块提供远端做种能力封装。
+
+## 数据类与异常
+
+- `SeederError`
+- `SeedSubmissionResult`
+- `QBTaskStatus`
+  - `verdict()`
+  - `summary()`
+
+## `RemoteSeeder`
+
+### 构造参数
+
+```python
+RemoteSeeder(
+    ssh_alias: str,
+    host: str | None = None,
+    port: int | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    download_base: str | None = None,
+)
+```
+
+### 方法
+
+- `login()`
+- `logout()`
+- `add_torrent(remote_torrent_path, save_path=None, skip_checking=True, paused=False)`
+- `add_magnet(magnet_uri, save_path=None, skip_checking=False, paused=False)`
+- `add_magnets(magnet_uris, save_path=None, skip_checking=False, paused=False)`
+- `get_torrent_statuses(info_hashes=None, names=None)`
+- `query_statuses(info_hashes=None, names=None)`
+- `add_torrents(remote_dir_or_paths, save_path=None, skip_checking=True, paused=False, glob_pattern='*.torrent')`
+- `upload_and_seed(torrent_paths, remote_dir=None, save_path=None, skip_checking=True, paused=False)`
+- `submit_remote_torrents(remote_paths, save_path=None, skip_checking=True, paused=False)`
+- `submit_magnets(magnet_uris, save_path=None, skip_checking=False, paused=False)`
+
+### 内部方法
+
+- `_resolve_remote_torrent_paths(...)`
+- `__enter__()` / `__exit__()`
+- `_load_config(...)`
+- `_ssh_run(ssh_alias, cmd, capture=False)`
+- `_parse_json_response(raw)`
+- `_parse_add_response(raw)`
+
+如果你当前工作流主要在本地 qBittorrent，则优先使用 `Publisher.seed_qbittorrent()`；如果做远端播种自动化，可再接 `RemoteSeeder`。
+
+---
+
+# 7.16 `_backup.py`
+
+负责旧文件备份。
+
+## `_make_backup_dir(parent_dir)`
+
+确保 `_backup/` 目录存在并返回路径。
+
+## `backup_if_exists(file_path, suffix=None)`
+
+如果文件存在，则移动到 `_backup/` 下并加时间戳。
+
+## `backup_path_if_exists(file_path)`
+
+若目标存在则备份，返回备份路径。
+
+这些函数被以下模块广泛调用：
+
+- `subtitle.py`
+- `encode.py`
+- `package.py`
+- `torrent.py`
+
+---
+
+# 7.17 `cli.py`
+
+## `main(argv=None)`
+
+保留兼容入口。当前项目主要推荐 Python API / Notebook 方式，而非 CLI 驱动。
+
+---
+
+# 7.18 `transfer.py`
+
+该模块保留旧传输层的兼容占位定义。
+
+### 异常
+
+- `TransferError`
+- `SSHConnectionError`
+- `HashVerificationError`
+- `CrocTransferError`
+
+### `Transfer.__init__(*args, **kwargs)`
+
+当前不建议作为主路径使用。新版内建上传建议直接使用 `R2Uploader`。
+
+---
+
+## 8. 典型代码片段
+
+### 8.1 先检查再跑单集流程
+
+```python
+plan = pipe.plan_episode(work_dir, episode_id='01', project=project)
+print(plan.summary())
+```
+
+### 8.2 提取音轨与字幕
+
+```python
+audio_result = pipe.extract_audio(work_dir, '01')
+sub_result = pipe.extract_subtitles(work_dir, '01', smart=True)
+print(audio_result)
+print(sub_result)
+```
+
+### 8.3 转录
+
+```python
+transcribe_result = pipe.transcribe_episode(
+    work_dir,
+    '01',
+    direct_model='mlx-community/whisper-large-v3-turbo',
+    chunked_model='mlx-community/whisper-medium-mlx',
+    manual_cuts=['01:30', '22:00'],
+)
+print(transcribe_result)
+```
+
+### 8.4 编码
+
+```python
+hevc_path = pipe.encode_episode(work_dir, '01')
+print(hevc_path)
+```
+
+### 8.5 字幕标准化
+
+```python
+subtitle_result = pipe.validate_subtitles(work_dir, '01', ensure_cht=True)
+print(subtitle_result)
+```
+
+也可以显式覆盖转换参数：
+
+```python
+config = PipelineConfig(
+    work_dir=work_dir,
+    project=project,
+    subtitle_conversion=SubtitleConversionConfig(
+        api_url='https://api.zhconvert.org/convert',
+        converter='Taiwan',
+        timeout=90,
+        backup_dir_name='_backup',
+        regenerate_existing_cht=True,
+    ),
+)
+pipe = Pipeline(config)
+subtitle_result = pipe.validate_subtitles(work_dir, '01', ensure_cht=True)
+```
+
+### 8.6 封装
+
+```python
+pkg_files = pipe.package_episode(work_dir, '01', project=project)
+print(pkg_files)
+```
+
+### 8.7 上传到 R2
+
+```python
+upload_result = pipe.upload_files_to_r2(
+    pkg_files,
+    remote_folder='作品名/01',
+)
+print(upload_result)
+```
+
+### 8.8 生成种子
+
+```python
+from bmlsub import TorrentCreator
+
+creator = TorrentCreator()
+torrent_path = creator.create('/path/to/release_dir', v1_only=True)
+print(torrent_path)
+```
+
+### 8.9 发布到 qBittorrent
+
+```python
+seed_result = pipe.seed_torrents(
+    files=pkg_files,
+    qb_host='http://127.0.0.1:8080',
+    qb_user='admin',
+    qb_pass='your-password',
+)
+print(seed_result)
+```
+
+---
+
+## 9. 参数优先级总结
+
+### 9.1 命名优先级
+
+多数涉及输出命名的位置，优先级通常为：
+
+1. 函数参数显式传入的 `prefix_chs` / `prefix_cht`
+2. 函数参数显式传入的 `project`
+3. `PipelineConfig.project`
+
+### 9.2 R2 配置优先级
+
+1. `R2Uploader(...)` 构造参数
+2. 环境变量
+3. `~/.config/bml/r2_config.json`
+
+### 9.3 anibt 配置优先级
+
+1. `publish_anibt()` 的 `token` / `api_url`
+2. 环境变量
+3. `~/.config/bml/anibt_config.json`
+
+### 9.4 `Pipeline.process_episode()` 阶段开关
+
+- `skip_transcribe=True`：跳过 AI 转录
+- `skip_encode=True`：跳过 HEVC 编码
+- `skip_package=True`：跳过封装
+- `skip_upload=True`：跳过 R2 上传
+- `skip_seed=True`：跳过做种
+
+---
+
+## 10. 最推荐的实际用法
+
+如果你只想稳定完成一集，推荐下面这套：
+
+```python
+from pathlib import Path
+from bmlsub import Pipeline, PipelineConfig, ProjectNaming
+
+episode_dir = Path('/Users/miwata/Movies/BML/Project/01')
+project = ProjectNaming(
+    group='Billion Meta Lab',
+    name_chs='作品名',
+    name_cht='作品名',
+    romaji='Romaji',
+)
+
+pipe = Pipeline(PipelineConfig(work_dir=episode_dir, project=project))
+
+print(pipe.plan_episode(episode_dir, episode_id='01', project=project).summary())
+
+result = pipe.process_episode(
+    episode_dir=episode_dir,
+    episode_id='01',
+    project=project,
+    r2_prefix='作品名/01',
+    skip_seed=True,
+)
+
+print(result)
+```
+
+如果你在做整季 / 合集，推荐先从：
+
+```python
+ws = pipe.build_workstation(root_dir='/Users/miwata/Movies/BML/某项目', episode_ids='01-12')
+print(pipe.inspect_workstation(ws).summary())
+print(pipe.plan_workstation(ws).summary())
+```
+
+开始，先把目录、命名、字幕、原视频全部理顺，再进入单集执行阶段。
+
+如果合集阶段需要顺手完成“缺繁体自动生成 / 简体重建繁体”，可以继续按集调用：
+
+```python
+for ep_id in ws.effective_episode_ids:
+    ep_dir = pipe._single_episode_dir(ws, ep_id)
+    result = pipe.validate_subtitles(ep_dir, ep_id, ensure_cht=True)
+    print(ep_id, result)
+```
+
+这表示：
+
+- `bmlsub` 本身支持合集 / workstation 模式
+- 新增的内置繁化姬能力也可以用于合集
+- 当前更推荐的编排方式是：**先 `inspect_workstation()` / `plan_workstation()`，再对需要的阶段逐集执行**
+
+---
+
+## 11. 备注
+
+- 当前代码主路径是 **Python API / Notebook 编排**。
+- 上传主路径建议使用 `R2Uploader`。
+- 批量工程建议先用 `WorkstationConfig` 做 stage0 检查。
+- 合集模式下若需要自动补繁体，可在逐集循环里调用 `validate_subtitles(..., ensure_cht=True)`。
+- 任何会覆盖原文件的动作（字幕标准化、重新编码、重新封装、重新生成种子）都内建了备份逻辑。
+
+如果后续还需要，我可以继续把这份 README 再细化成：
+
+1. **仅公开 API 版**（短）
+2. **包含内部私有函数说明版**（更长）
+3. **按 notebook 实战流程重排版**（最适合日常使用）
