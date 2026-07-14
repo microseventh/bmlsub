@@ -4,12 +4,13 @@
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from pathlib import Path
 
-import requests
-
 from ._backup import backup_if_exists
+from .hanvert import HanvertConversionError, _read_ass, convert_ass_with_fanhuaji
 from .config import (
     SubtitleStandard,
     SubtitleConversionConfig,
@@ -149,7 +150,9 @@ class SubtitleValidator:
                            converter: str | None = None,
                            api_url: str | None = None,
                            timeout: int | None = None,
-                           backup_existing: bool = True) -> Path:
+                           backup_existing: bool = True,
+                           full_file: bool = False,
+                           fallback_to_full_file: bool = True) -> Path:
         chs_path = Path(chs_path)
         if not chs_path.exists():
             raise FileNotFoundError(f"简体字幕不存在: {chs_path}")
@@ -160,37 +163,54 @@ class SubtitleValidator:
         mode = converter or cfg.converter
         req_timeout = timeout if timeout is not None else cfg.timeout
 
-        if backup_existing and output.exists():
-            bak = backup_if_exists(output)
-            if bak:
-                print(f"📦 已备份旧繁体字幕 → {bak.name}")
-
         print(f"🔄 繁化姬转换: {chs_path.name} -> {output.name} ({mode})")
-        chs_content = chs_path.read_text(encoding="utf-8")
+        chs_content, _ = _read_ass(chs_path)
 
         try:
-            response = requests.post(
-                api,
-                data={"text": chs_content, "converter": mode},
+            converted_content, stats = convert_ass_with_fanhuaji(
+                chs_content,
+                converter=mode,
+                api_url=api,
                 timeout=req_timeout,
+                full_file=full_file,
+                fallback_to_full_file=fallback_to_full_file,
             )
-            response.raise_for_status()
-            payload = response.json()
-        except requests.exceptions.RequestException as exc:
-            raise SubtitleConversionError(f"繁化姬请求失败: {exc}") from exc
-        except ValueError as exc:
-            raise SubtitleConversionError("繁化姬返回了无法解析的 JSON") from exc
+        except HanvertConversionError as exc:
+            raise SubtitleConversionError(str(exc)) from exc
 
-        if payload.get("code") != 0:
-            message = payload.get("msg") or payload.get("message") or "未知错误"
-            raise SubtitleConversionError(f"繁化姬返回错误: {message}")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=output.parent,
+                prefix=f".{output.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary.write(converted_content)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+                temporary_path = Path(temporary.name)
+            if backup_existing and output.exists():
+                bak = backup_if_exists(output)
+                if bak:
+                    print(f"📦 已备份旧繁体字幕 → {bak.name}")
+            temporary_path.replace(output)
+            temporary_path = None
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
 
-        text = (((payload.get("data") or {}).get("text")))
-        if not isinstance(text, str):
-            raise SubtitleConversionError("繁化姬响应缺少 data.text")
-
-        output.write_text(text, encoding="utf-8")
-        print(f"✅ 繁体字幕已生成: {output.name}")
+        mode_label = "全文件" if stats["conversion_mode"] == "full_file" else "ASS 感知"
+        print(f"✅ 繁体字幕已生成: {output.name} ({mode_label}模式)")
+        if stats["fallback_reason"] and stats["fallback_reason"] != "requested":
+            print(f"⚠️  ASS 感知无法可靠转换，已自动改用全文件繁化: {stats['fallback_reason']}")
+        if stats["length_changed_events"]:
+            print(f"⚠️  {stats['length_changed_events']} 条繁化结果长度发生变化，请抽查标签位置")
+        if stats["skipped_mixed_groups"]:
+            print(f"⚠️  跳过 {stats['skipped_mixed_groups']} 个无法可靠拆分的中日混合文本段")
         return output
 
     def ensure_episode_subtitles(self,
@@ -203,6 +223,8 @@ class SubtitleValidator:
                                  api_url: str | None = None,
                                  timeout: int | None = None,
                                  regenerate_cht: bool | None = None,
+                                 full_file: bool = False,
+                                 fallback_to_full_file: bool = True,
                                  standardize: bool = True) -> dict:
         ctx = EpisodeFiles.discover(
             episode_dir,
@@ -231,16 +253,15 @@ class SubtitleValidator:
         print(f"找到字幕文件: 简体={chs_file.name if chs_file else '❌ 未找到'} / 繁体={cht_file.name if cht_file else '❌ 未找到'}")
 
         if chs_file and cht_file and regenerate:
-            print("📌 已同时找到简繁字幕：以简体为基准，旧繁体移入备份后重新生成")
-            backup_path = self.move_to_backup(cht_file)
-            result["backed_up"].append(backup_path)
+            print("📌 已同时找到简繁字幕：先生成并验证新繁体，成功后再备份旧文件")
             cht_file = self.convert_chs_to_cht(
                 chs_file,
                 output_path=cht_file,
                 converter=converter,
                 api_url=api_url,
                 timeout=timeout,
-                backup_existing=False,
+                full_file=full_file,
+                fallback_to_full_file=fallback_to_full_file,
             )
             result["generated_cht"] = cht_file
         elif chs_file and not cht_file:
@@ -251,6 +272,8 @@ class SubtitleValidator:
                 converter=converter,
                 api_url=api_url,
                 timeout=timeout,
+                full_file=full_file,
+                fallback_to_full_file=fallback_to_full_file,
             )
             result["generated_cht"] = cht_file
         elif cht_file and not chs_file:

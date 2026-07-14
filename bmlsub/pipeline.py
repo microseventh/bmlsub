@@ -594,7 +594,9 @@ class Pipeline:
                            converter: str | None = None,
                            api_url: str | None = None,
                            timeout: int | None = None,
-                           regenerate_cht: bool | None = None) -> dict:
+                           regenerate_cht: bool | None = None,
+                           full_file: bool = False,
+                           fallback_to_full_file: bool = True) -> dict:
         ctx = EpisodeFiles.discover(
             episode_dir,
             episode_id,
@@ -614,6 +616,8 @@ class Pipeline:
                 api_url=api_url,
                 timeout=timeout,
                 regenerate_cht=regenerate_cht,
+                full_file=full_file,
+                fallback_to_full_file=fallback_to_full_file,
                 standardize=True,
             )
             return {

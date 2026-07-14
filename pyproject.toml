@@ -39,5 +39,8 @@ transcribe = ["mlx-whisper>=0.3"]
 torrent = ["libtorrent>=2.0"]
 all = ["bml-subpro[transcribe,torrent]"]
 
+[project.scripts]
+bmlsub = "bmlsub.cli:main"
+
 [tool.setuptools]
 packages = ["bmlsub"]

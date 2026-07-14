@@ -5,6 +5,7 @@ BML v2 流水线统一配置
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 
 
@@ -153,6 +154,114 @@ class ProjectNaming:
     @property
     def prefix_cht(self) -> str:
         return _compose_prefix(self.group, self.name_cht, self.romaji)
+
+
+PROJECT_CONFIG_FILENAME = "bmlsub-project.json"
+
+
+@dataclass
+class ProjectConfig:
+    """当前目录中的可复用项目配置。"""
+
+    schema_version: int = 1
+    project: ProjectNaming = field(default_factory=ProjectNaming)
+    episode_ids: list[str] | str = field(default_factory=list)
+    r2_prefix: str = ""
+    bgm_id: int | None = None
+    notes: str = ""
+    qb_host: str = ""
+
+    def __post_init__(self) -> None:
+        self.episode_ids = parse_episode_ids(self.episode_ids)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ProjectConfig":
+        if not isinstance(data, dict):
+            raise ValueError("项目配置根节点必须是 JSON 对象")
+        version = data.get("schema_version", 1)
+        if version != 1:
+            raise ValueError(f"不支持的项目配置 schema_version: {version}")
+
+        project_data = data.get("project", {})
+        release_data = data.get("release", {})
+        if not isinstance(project_data, dict):
+            raise ValueError("项目配置 project 必须是 JSON 对象")
+        if not isinstance(release_data, dict):
+            raise ValueError("项目配置 release 必须是 JSON 对象")
+
+        episodes = data.get("episodes", [])
+        if not isinstance(episodes, (str, list)):
+            raise ValueError("项目配置 episodes 必须是字符串或数组")
+        bgm_id = release_data.get("bgm_id")
+        if bgm_id is not None and not isinstance(bgm_id, int):
+            raise ValueError("项目配置 release.bgm_id 必须是整数或 null")
+
+        def text_value(mapping: dict, key: str, default: str = "") -> str:
+            value = mapping.get(key, default)
+            if not isinstance(value, str):
+                raise ValueError(f"项目配置 {key} 必须是字符串")
+            return value
+
+        return cls(
+            schema_version=version,
+            project=ProjectNaming(
+                group=text_value(project_data, "group", ProjectNaming.group),
+                name_chs=text_value(project_data, "name_chs", ProjectNaming.name_chs),
+                name_cht=text_value(project_data, "name_cht", ProjectNaming.name_cht),
+                romaji=text_value(project_data, "romaji", ProjectNaming.romaji),
+            ),
+            episode_ids=episodes,
+            r2_prefix=text_value(release_data, "r2_prefix"),
+            bgm_id=bgm_id,
+            notes=text_value(release_data, "notes"),
+            qb_host=text_value(release_data, "qb_host"),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": self.schema_version,
+            "project": {
+                "group": self.project.group,
+                "name_chs": self.project.name_chs,
+                "name_cht": self.project.name_cht,
+                "romaji": self.project.romaji,
+            },
+            "episodes": list(self.episode_ids),
+            "release": {
+                "r2_prefix": self.r2_prefix,
+                "bgm_id": self.bgm_id,
+                "notes": self.notes,
+                "qb_host": self.qb_host,
+            },
+        }
+
+
+def project_config_path(directory: Path | str | None = None) -> Path:
+    return Path(directory or Path.cwd()).expanduser().resolve() / PROJECT_CONFIG_FILENAME
+
+
+def load_project_config(directory: Path | str | None = None) -> ProjectConfig | None:
+    path = project_config_path(directory)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"项目配置 JSON 无效: {path}: {exc.msg}") from exc
+    return ProjectConfig.from_dict(data)
+
+
+def save_project_config(config: ProjectConfig, directory: Path | str | None = None,
+                        *, overwrite: bool = False) -> Path:
+    path = project_config_path(directory)
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"项目配置已存在: {path}；使用 --force 覆盖")
+    path.write_text(
+        json.dumps(config.to_dict(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
 
 @dataclass
 class WorkstationConfig:
