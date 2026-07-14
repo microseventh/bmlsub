@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bml-subpro"
-version = "0.3.0"
+version = "0.3.1"
 description = "BML 动漫字幕制作与发布流水线 — 单集/合集工作流、字幕繁化、封装、上传与发布"
 readme = "README.md"
 license = {text = "MIT"}

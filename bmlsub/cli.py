@@ -521,7 +521,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="bmlsub",
         description="BML 动漫字幕制作、编码、封装与发布流水线",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.3.0")
+    parser.add_argument("--version", action="version", version="%(prog)s 0.3.1")
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
