@@ -1,858 +1,739 @@
-"""
-流水线编排
-
-设计原则：
-- 每一步都可独立执行
-- 每一步都显式检查自己的前置条件
-- 保留 notebook 友好输出，同时返回结构化结果
-- 单集模式与合集模式分层，但共享底层模块
-"""
+"""Compatibility Python API for the migrated subtitle vertical slice."""
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-from .config import PipelineConfig, ProjectNaming, WorkstationConfig
-from .encode import Encoder
-from .episode import EpisodeFiles
-from .media import MediaExtractor
-from .package import Packager, PackagingError
-from .progress import PipelineTimer
-from .publish import Publisher
-from .r2upload import R2Uploader
-from .subtitle import SubtitleValidator
-from .torrent import TorrentCreator
-from .transcribe import Transcriber, TranscriptionError
-
-
-@dataclass
-class StageStatus:
-    name: str
-    ready: bool
-    missing: list[str] = field(default_factory=list)
-    outputs: list[str] = field(default_factory=list)
-    notes: list[str] = field(default_factory=list)
-
-    def summary(self) -> dict:
-        return {
-            "name": self.name,
-            "ready": self.ready,
-            "missing": list(self.missing),
-            "outputs": list(self.outputs),
-            "notes": list(self.notes),
-        }
-
-
-@dataclass
-class EpisodeStagePlan:
-    episode_id: str
-    inspect: StageStatus
-    extract_subtitles: StageStatus
-    extract_audio: StageStatus
-    transcribe: StageStatus
-    encode_hevc: StageStatus
-    validate_subtitles: StageStatus
-    package: StageStatus
-
-    def summary(self) -> dict:
-        return {
-            "episode_id": self.episode_id,
-            "inspect": self.inspect.summary(),
-            "extract_subtitles": self.extract_subtitles.summary(),
-            "extract_audio": self.extract_audio.summary(),
-            "transcribe": self.transcribe.summary(),
-            "encode_hevc": self.encode_hevc.summary(),
-            "validate_subtitles": self.validate_subtitles.summary(),
-            "package": self.package.summary(),
-        }
-
-
-@dataclass
-class WorkstationStage0Summary:
-    workstation: dict
-    stage0: StageStatus
-
-    def summary(self) -> dict:
-        payload = dict(self.workstation)
-        payload["stage0"] = self.stage0.summary()
-        return payload
-
-
-@dataclass
-class WorkstationBatchResult:
-    mode: str
-    stage: str
-    ok: bool
-    items: list[dict] = field(default_factory=list)
-    missing: list[str] = field(default_factory=list)
-    outputs: list[str] = field(default_factory=list)
-    notes: list[str] = field(default_factory=list)
-
-    def summary(self) -> dict:
-        return {
-            "mode": self.mode,
-            "stage": self.stage,
-            "ok": self.ok,
-            "items": list(self.items),
-            "missing": list(self.missing),
-            "outputs": list(self.outputs),
-            "notes": list(self.notes),
-        }
+from .ass_analysis import (
+    AssAnalysisProfile, AssReconstructionProfile, combine_analyses, export_analysis,
+    export_analysis_bundle, get_analysis_event, get_bundle_event, index_analysis_events,
+    index_bundle_events, load_analysis, load_analysis_bundle, run_ass_analysis,
+    run_ass_normalization, run_ass_reconstruction,
+)
+from .assets import (
+    SourceAssetKind,
+    SourceAssetRegistrationOptions,
+    episode_manifest,
+    run_asset_matching,
+    run_match_confirmation,
+    run_source_asset_registration,
+)
+from .credentials import CredentialService
+from .credentials.keychain import SecretStore
+from .credentials.ssh_config import SSHConfigResolver
+from .hanvert import ConverterProvider
+from .media import (
+    AudioOutputMode,
+    FFprobeClient,
+    TrackKind,
+    VideoPurpose,
+    VideoRegistrationOptions,
+    get_current_artifact,
+    list_current_artifacts,
+    list_media_tracks as list_registered_media_tracks,
+    resolve_video as resolve_registered_video,
+    run_attachment_extraction,
+    run_audio_extraction,
+    run_subtitle_extraction,
+    run_video_registration,
+)
+from .production.models import ProductionOperation
+from .production.requests import create_production_request
+from .production.execution import run_production_request
+from .release import (
+    AnibtPublishProfile, Boto3R2Client, QBittorrentClient, QBittorrentSeedProfile,
+    R2Client, R2UploadProfile, RemotePullClient, RemotePullProfile,
+    RequestsAnibtClient, SSHQBittorrentClient, SSHRclonePullClient,
+    TorrentProfile, TrackerListClient,
+    resolve_anibt_credentials, resolve_qbittorrent_credentials, resolve_r2_credentials,
+    run_anibt_publish, run_qbittorrent_seed, run_r2_upload, run_remote_pull,
+    run_torrent_creation,
+)
+from .state.models import StageResult, StageStatus
+from .state.sqlite_store import SQLiteJobStore
+from .subtitle import SubtitleConversionOptions, derive_cht_path, run_subtitle_conversion
+from .transcription import TranscriptionMode, TranscriptionOptions, run_transcription
 
 
 class Pipeline:
-    """完整流水线编排器。"""
+    def __init__(self, *, store: SQLiteJobStore | None = None,
+                 state_dir: Path | str | None = None,
+                 provider: ConverterProvider | None = None,
+                 credential_service: CredentialService | None = None) -> None:
+        self.store = store
+        self.state_dir = state_dir
+        self.provider = provider
+        self.credential_service = credential_service
 
-    def __init__(self, config: PipelineConfig | None = None, **kwargs):
-        self.config = config or PipelineConfig(**kwargs)
-        self.work_dir = self.config.work_dir
-        self._extractor: MediaExtractor | None = None
-        self._transcriber: Transcriber | None = None
-        self._encoder: Encoder | None = None
-        self._validator: SubtitleValidator | None = None
-
-    @property
-    def extractor(self) -> MediaExtractor:
-        if self._extractor is None:
-            self._extractor = MediaExtractor(self.work_dir)
-        return self._extractor
-
-    @property
-    def transcriber(self) -> Transcriber:
-        if self._transcriber is None:
-            self._transcriber = Transcriber(
-                model=self.config.whisper_fast_model,
-                language=self.config.language,
-                chunk_sec=self.config.chunk_sec,
-                overlap_sec=self.config.overlap_sec,
-                output_root=self.config.output_transcripts_dir,
-            )
-        return self._transcriber
-
-    @property
-    def encoder(self) -> Encoder:
-        if self._encoder is None:
-            self._encoder = Encoder(self.config.hevc_preset, self.config.x264_preset)
-        return self._encoder
-
-    @property
-    def validator(self) -> SubtitleValidator:
-        if self._validator is None:
-            self._validator = SubtitleValidator(self.config.sub_standard, config=self.config)
-        return self._validator
-
-    def context(self,
-                episode_dir: Path | str,
-                episode_id: str | None = None,
-                prefix_chs: str | None = None,
-                prefix_cht: str | None = None,
-                project: ProjectNaming | None = None,
-                source_video: Path | str | None = None,
-                chs_subtitle: Path | str | None = None,
-                cht_subtitle: Path | str | None = None) -> EpisodeFiles:
-        return EpisodeFiles.discover(
-            episode_dir,
-            episode_id,
-            prefix_chs=prefix_chs,
-            prefix_cht=prefix_cht,
-            config=self.config,
-            project=project,
-            source_video=source_video,
-            chs_subtitle=chs_subtitle,
-            cht_subtitle=cht_subtitle,
+    @staticmethod
+    def _discover(episode_dir: Path, episode_id: str, kind: str) -> Path | None:
+        patterns = (
+            f"{episode_id}.{kind}&jpn.ass",
+            f"{episode_id}.{kind}.ass",
+            f"*{episode_id}*.{kind}&jpn.ass",
+            f"*{episode_id}*.{kind}.ass",
         )
+        for pattern in patterns:
+            matches = sorted(episode_dir.glob(pattern))
+            if matches:
+                return matches[0].resolve()
+        return None
 
-    def inspect_episode(self, episode_dir: Path | str,
-                        episode_id: str | None = None,
-                        prefix_chs: str | None = None,
-                        prefix_cht: str | None = None,
-                        project: ProjectNaming | None = None,
-                        source_video: Path | str | None = None,
-                        chs_subtitle: Path | str | None = None,
-                        cht_subtitle: Path | str | None = None) -> dict:
-        return self.context(
-            episode_dir,
-            episode_id,
-            prefix_chs=prefix_chs,
-            prefix_cht=prefix_cht,
-            project=project,
-            source_video=source_video,
-            chs_subtitle=chs_subtitle,
-            cht_subtitle=cht_subtitle,
-        ).summary()
-
-    def plan_episode(self,
-                     episode_dir: Path | str,
-                     episode_id: str | None = None,
-                     prefix_chs: str | None = None,
-                     prefix_cht: str | None = None,
-                     project: ProjectNaming | None = None,
-                     source_video: Path | str | None = None,
-                     chs_subtitle: Path | str | None = None,
-                     cht_subtitle: Path | str | None = None) -> EpisodeStagePlan:
-        ctx = self.context(
-            episode_dir,
-            episode_id,
-            prefix_chs=prefix_chs,
-            prefix_cht=prefix_cht,
-            project=project,
-            source_video=source_video,
-            chs_subtitle=chs_subtitle,
-            cht_subtitle=cht_subtitle,
+    @staticmethod
+    def _result_payload(result: StageResult, *, chs: Path, cht: Path) -> dict[str, Any]:
+        output_available = cht.exists()
+        succeeded = result.status is StageStatus.SUCCEEDED or (
+            result.status is StageStatus.SKIPPED and output_available
         )
-        packager = Packager(
-            ctx.episode_dir,
-            ctx.episode_id,
-            self.config,
-            source_video=source_video,
-            chs_subtitle=chs_subtitle,
-            cht_subtitle=cht_subtitle,
-        )
-        package_plan = packager.build_plan(
-            prefix_chs=prefix_chs,
-            prefix_cht=prefix_cht,
-            project=project,
-        )
-
-        inspect = StageStatus(
-            name="inspect",
-            ready=True,
-            outputs=[ctx.episode_id],
-            notes=["统一资源发现已完成"],
-        )
-        extract_subtitles = StageStatus(
-            name="extract_subtitles",
-            ready=ctx.pure_mkv is not None,
-            missing=[] if ctx.pure_mkv else [str(ctx.source_video_path or (ctx.episode_dir / f'{ctx.episode_id}.mkv'))],
-            outputs=[str(path) for path in ctx.extracted_subtitles],
-        )
-        extract_audio = StageStatus(
-            name="extract_audio",
-            ready=ctx.pure_mkv is not None,
-            missing=[] if ctx.pure_mkv else [str(ctx.source_video_path or (ctx.episode_dir / f'{ctx.episode_id}.mkv'))],
-            outputs=[str(path) for path in ctx.extracted_audio],
-        )
-        transcribe = StageStatus(
-            name="transcribe",
-            ready=bool(ctx.extracted_audio),
-            missing=[] if ctx.extracted_audio else [f"{ctx.episode_id}_audio_*.aac"],
-            outputs=[str(path) for path in ctx.extracted_audio],
-            notes=["依赖先提取音轨"] if not ctx.extracted_audio else [],
-        )
-        encode_hevc = StageStatus(
-            name="encode_hevc",
-            ready=ctx.pure_mkv is not None,
-            missing=[] if ctx.pure_mkv else [str(ctx.source_video_path or (ctx.episode_dir / f'{ctx.episode_id}.mkv'))],
-            outputs=[str(ctx.hevc_mkv)] if ctx.hevc_mkv else [],
-        )
-        validate_subtitles = StageStatus(
-            name="validate_subtitles",
-            ready=bool(ctx.all_subs),
-            missing=[] if ctx.all_subs else [f"{ctx.episode_id}.chs&jpn.ass / {ctx.episode_id}.cht&jpn.ass"],
-            outputs=[str(path) for path in ctx.all_subs],
-        )
-        package = StageStatus(
-            name="package",
-            ready=package_plan.has_mp4_inputs or package_plan.has_mkv_inputs,
-            missing=sorted(set(package_plan.missing_for_mp4 + package_plan.missing_for_mkv)),
-            outputs=[
-                str(path) for path in (
-                    package_plan.mp4_chs_output,
-                    package_plan.mp4_cht_output,
-                    package_plan.mkv_output,
-                ) if path is not None
-            ],
-            notes=[
-                "MP4 硬压与 MKV 内封是独立子步骤",
-                "整体顺序建议参考 workstation.ipynb：先提取/校验，再编码/封装",
-            ],
-        )
-        return EpisodeStagePlan(
-            episode_id=ctx.episode_id,
-            inspect=inspect,
-            extract_subtitles=extract_subtitles,
-            extract_audio=extract_audio,
-            transcribe=transcribe,
-            encode_hevc=encode_hevc,
-            validate_subtitles=validate_subtitles,
-            package=package,
-        )
-
-    def build_workstation(self,
-                          root_dir: Path | str,
-                          episode_ids: list[str] | str | None = None,
-                          **kwargs) -> WorkstationConfig:
-        return WorkstationConfig(root_dir=Path(root_dir), episode_ids=episode_ids or [], **kwargs)
-
-    def inspect_workstation(self, workstation: WorkstationConfig | Path | str, **kwargs) -> WorkstationStage0Summary:
-        ws = self._normalize_workstation(workstation, **kwargs)
-        checks = ws.stage0_checks()
-        missing_parts: list[str] = []
-        summary = ws.missing_summary()
-        if summary["source"]:
-            missing_parts.append(f"缺少源视频: {', '.join(summary['source'])}")
-        if summary["chs_sub"]:
-            missing_parts.append(f"缺少简日字幕: {', '.join(summary['chs_sub'])}")
-        if summary["cht_sub"]:
-            missing_parts.append(f"缺少繁日字幕: {', '.join(summary['cht_sub'])}")
-
-        stage0 = StageStatus(
-            name="stage0",
-            ready=not missing_parts,
-            missing=missing_parts,
-            outputs=[str(ws.raw_dir), str(ws.sub_dir), str(ws.sub_tj_dir)],
-            notes=[
-                f"共检查 {len(checks)} 集",
-                "合集模式阶段 0 用于统一项目参数、目录布局与前置条件检查",
-            ],
-        )
-        return WorkstationStage0Summary(workstation=ws.summary(), stage0=stage0)
-
-    def plan_workstation(self, workstation: WorkstationConfig | Path | str, **kwargs) -> WorkstationBatchResult:
-        ws = self._normalize_workstation(workstation, **kwargs)
-        items: list[dict] = []
-        outputs: list[str] = []
-        missing: list[str] = []
-
-        for ep_id in ws.effective_episode_ids:
-            episode_dir = self._single_episode_dir(ws, ep_id)
-            plan = self.plan_episode(
-                episode_dir,
-                episode_id=ep_id,
-                prefix_chs=ws.prefix_chs,
-                prefix_cht=ws.prefix_cht,
-            )
-            plan_summary = plan.summary()
-            items.append(plan_summary)
-            outputs.extend(stage["name"] for key, stage in plan_summary.items() if isinstance(stage, dict) and stage["ready"])
-            for key, stage in plan_summary.items():
-                if isinstance(stage, dict) and stage["missing"]:
-                    for value in stage["missing"]:
-                        marker = f"EP{ep_id}:{key}:{value}"
-                        if marker not in missing:
-                            missing.append(marker)
-
-        return WorkstationBatchResult(
-            mode="collection",
-            stage="plan",
-            ok=not missing,
-            items=items,
-            missing=missing,
-            outputs=outputs,
-            notes=["合集模式计划按集汇总单集阶段 readiness"],
-        )
-
-    def extract_subtitles(self,
-                          episode_dir: Path | str,
-                          episode_id: str,
-                          smart: bool = False,
-                          source_video: Path | str | None = None,
-                          chs_subtitle: Path | str | None = None,
-                          cht_subtitle: Path | str | None = None) -> dict:
-        ctx = EpisodeFiles.discover(
-            episode_dir,
-            episode_id,
-            config=self.config,
-            source_video=source_video,
-            chs_subtitle=chs_subtitle,
-            cht_subtitle=cht_subtitle,
-        )
-        if not ctx.pure_mkv:
-            missing_source = str(ctx.source_video_path or (ctx.episode_dir / f'{episode_id}.mkv'))
-            return {"ok": False, "missing": [missing_source], "tracks": []}
-
-        if smart:
-            subs = MediaExtractor(ctx.episode_dir).extract_preferred_subtitles(
-                ctx.pure_mkv,
-                langs=self.config.subtitle_strategy.preferred,
-                output_stem=episode_id,
-            )
-            tracks = subs.all_tracks() if subs else []
-        else:
-            tracks = MediaExtractor(ctx.episode_dir).extract_subtitle_tracks(
-                ctx.pure_mkv,
-                output_stem=episode_id,
-            )
-
+        generated = str(cht) if result.status is StageStatus.SUCCEEDED else None
+        backups = [
+            item.context["path"] for item in result.diagnostics
+            if item.code == "artifact_backup_created" and "path" in item.context
+        ]
         return {
-            "ok": True,
+            "all_ok": succeeded and not result.needs_review,
+            "standardized": [],
             "missing": [],
-            "tracks": [str(track.output_path) for track in tracks],
+            "generated_cht": generated,
+            "backed_up": backups,
+            "validated": [str(chs)] + ([str(cht)] if cht.exists() else []),
+            "run_id": result.run_id,
+            "stage": result.stage_name,
+            "status": result.status.value,
+            "diagnostics": [item.to_dict() for item in result.diagnostics],
+            "error": dict(result.error) if result.error else None,
+            "retryable": result.retryable,
+            "needs_review": result.needs_review,
+            "reused": result.reused,
+            "artifacts": [item.to_dict() for item in result.artifacts],
         }
 
-    def extract_audio(self, episode_dir: Path | str, episode_id: str,
-                      source_video: Path | str | None = None,
-                      chs_subtitle: Path | str | None = None,
-                      cht_subtitle: Path | str | None = None) -> dict:
-        ctx = EpisodeFiles.discover(
-            episode_dir,
-            episode_id,
-            config=self.config,
-            source_video=source_video,
-            chs_subtitle=chs_subtitle,
-            cht_subtitle=cht_subtitle,
-        )
-        if not ctx.pure_mkv:
-            missing_source = str(ctx.source_video_path or (ctx.episode_dir / f'{episode_id}.mkv'))
-            return {"ok": False, "missing": [missing_source], "tracks": []}
-
-        tracks = MediaExtractor(ctx.episode_dir).extract_audio_tracks(ctx.pure_mkv, output_stem=episode_id)
-        return {
-            "ok": True,
-            "missing": [],
-            "tracks": [str(track.output_path) for track in tracks],
-        }
-
-    def extract_media(self, episode_dir: Path | str | None = None,
-                      episodes: list[str] | None = None,
-                      smart_subs: bool = True) -> dict[str, dict]:
-        directory = Path(episode_dir) if episode_dir else self.work_dir
-        extractor = MediaExtractor(directory)
-        if episodes:
-            targets = [directory / f"{ep}.mkv" for ep in episodes if (directory / f"{ep}.mkv").exists()]
-        else:
-            targets = extractor.find_digit_mkvs()
-
-        results: dict[str, dict] = {}
-        for target in targets:
-            print(f"\n>>> 提取: {target.name}")
-            audio = extractor.extract_audio_tracks(target)
-            if smart_subs:
-                subs = extractor.extract_preferred_subtitles(target, langs=self.config.subtitle_strategy.preferred)
-                sub_tracks = subs.all_tracks() if subs else []
-                subs_ok = subs is not None and subs.has_any
-                if subs is None:
-                    print(f"⚠️  [{target.stem}] 无字幕轨道！后续封装将需要外部字幕文件")
-            else:
-                sub_tracks = extractor.extract_subtitle_tracks(target)
-                subs_ok = len(sub_tracks) > 0
-            results[target.stem] = {
-                "audio": audio,
-                "subs": sub_tracks,
-                "subs_ok": subs_ok,
-            }
-        return results
-
-    def validate_workstation_subtitles(self, workstation: WorkstationConfig | Path | str, **kwargs) -> WorkstationBatchResult:
-        ws = self._normalize_workstation(workstation, **kwargs)
-        items: list[dict] = []
-        outputs: list[str] = []
-        missing: list[str] = []
-
-        for ep_id in ws.effective_episode_ids:
-            result = self.validate_subtitles(self._single_episode_dir(ws, ep_id), ep_id)
-            items.append({"episode_id": ep_id, **result})
-            outputs.extend(result.get("standardized", []))
-            missing.extend([f"EP{ep_id}:{name}" for name in result.get("missing", [])])
-
-        return WorkstationBatchResult(
-            mode="collection",
-            stage="validate_subtitles",
-            ok=not missing,
-            items=items,
-            missing=missing,
-            outputs=outputs,
-            notes=["合集模式按集复用单集字幕校验逻辑"],
-        )
-
-    def encode_workstation_hevc(self, workstation: WorkstationConfig | Path | str, **kwargs) -> WorkstationBatchResult:
-        ws = self._normalize_workstation(workstation, **kwargs)
-        items: list[dict] = []
-        outputs: list[str] = []
-        missing: list[str] = []
-
-        for ep_id in ws.effective_episode_ids:
-            src = ws.source_video(ep_id)
-            dst = ws.hevc_path(ep_id)
-            if not src.exists():
-                marker = f"EP{ep_id}:{src.name}"
-                missing.append(marker)
-                items.append({"episode_id": ep_id, "ok": False, "missing": [str(src)], "output": str(dst)})
-                continue
-            items.append({"episode_id": ep_id, "ok": True, "input": str(src), "output": str(dst)})
-            outputs.append(str(dst))
-
-        return WorkstationBatchResult(
-            mode="collection",
-            stage="encode_hevc",
-            ok=not missing,
-            items=items,
-            missing=missing,
-            outputs=outputs,
-            notes=["合集模式阶段 3 以项目级目录布局推导 HEVC 输出路径"],
-        )
-
-    def build_release_batch(self, workstation: WorkstationConfig | Path | str, **kwargs) -> WorkstationBatchResult:
-        ws = self._normalize_workstation(workstation, **kwargs)
-        creator = TorrentCreator()
-        items: list[dict] = []
-        outputs: list[str] = []
-        missing: list[str] = []
-
-        for label, kind in (("HEVC", "hevc"), ("简日", "chs"), ("繁日", "cht")):
-            pack_dir = ws.release_pack_dir(kind)
-            torrent_path = ws.release_torrent_path(kind)
-            exists = pack_dir.exists() and any(pack_dir.rglob("*"))
-            item = {
-                "label": label,
-                "kind": kind,
-                "pack_dir": str(pack_dir),
-                "torrent_path": str(torrent_path),
-                "ready": exists,
-            }
-            if exists:
-                try:
-                    item["plan"] = creator.build_plan(pack_dir, dst=torrent_path, v1_only=True).summary()
-                except FileNotFoundError:
-                    item["ready"] = False
-            if item["ready"]:
-                outputs.append(str(torrent_path))
-            else:
-                missing.append(f"{label}:{pack_dir}")
-            items.append(item)
-
-        return WorkstationBatchResult(
-            mode="collection",
-            stage="torrent_release_dirs",
-            ok=not missing,
-            items=items,
-            missing=missing,
-            outputs=outputs,
-            notes=["合集模式按发布文件夹整体生成种子，而非逐集生成"],
-        )
-
-    def transcribe_episode(self, episode_dir: Path | str,
-                           episode_id: str,
-                           direct_model: str | None = None,
-                           chunked_model: str | None = None,
-                           manual_cuts: list[str] | None = None,
-                           source_video: Path | str | None = None,
-                           chs_subtitle: Path | str | None = None,
-                           cht_subtitle: Path | str | None = None) -> dict:
-        directory = Path(episode_dir)
-        ctx = EpisodeFiles.discover(
-            directory,
-            episode_id,
-            config=self.config,
-            source_video=source_video,
-            chs_subtitle=chs_subtitle,
-            cht_subtitle=cht_subtitle,
-        )
-        audio_files = ctx.extracted_audio or sorted(directory.glob(f"{episode_id}_audiotracker*.aac"))
-        if not audio_files:
-            print(f"⚠️ 找不到 EP{episode_id} 的音轨文件")
-            return {"ok": False, "missing": [f"{episode_id}_audio_*.aac"], "direct": None, "chunked": None}
-
-        audio = audio_files[0]
-        direct = None
-        try:
-            direct = self.transcriber.transcribe_direct(audio, model=direct_model or self.config.whisper_fast_model)
-        except TranscriptionError as e:
-            print(f"⚠️ 直接转录失败: {e}")
-
-        chunked = None
-        try:
-            chunked = self.transcriber.transcribe_chunked(
-                audio,
-                model=chunked_model or self.config.whisper_detailed_model,
-                manual_cuts=manual_cuts,
-            )
-        except TranscriptionError as e:
-            print(f"⚠️ 分割转录失败: {e}")
-
-        return {
-            "ok": direct is not None or chunked is not None,
-            "missing": [],
-            "direct": direct,
-            "chunked": chunked,
-        }
-
-    def encode_episode(self, episode_dir: Path | str, episode_id: str,
-                       source_video: Path | str | None = None,
-                       chs_subtitle: Path | str | None = None,
-                       cht_subtitle: Path | str | None = None) -> Path:
-        ctx = EpisodeFiles.discover(
-            episode_dir,
-            episode_id,
-            config=self.config,
-            source_video=source_video,
-            chs_subtitle=chs_subtitle,
-            cht_subtitle=cht_subtitle,
-        )
-        if not ctx.pure_mkv:
-            raise FileNotFoundError(f"源文件不存在: {ctx.source_video_path or (Path(episode_dir) / f'{episode_id}.mkv')}")
-        target = ctx.episode_dir / f"{episode_id}_HEVC10bit.mkv"
-        return self.encoder.encode_hevc_vt(ctx.pure_mkv, dst=target)
-
-    def validate_subtitles(self, episode_dir: Path | str, episode_id: str,
-                           source_video: Path | str | None = None,
-                           chs_subtitle: Path | str | None = None,
-                           cht_subtitle: Path | str | None = None,
-                           ensure_cht: bool = False,
-                           converter: str | None = None,
-                           api_url: str | None = None,
-                           timeout: int | None = None,
-                           regenerate_cht: bool | None = None,
-                           full_file: bool = False,
-                           fallback_to_full_file: bool = True) -> dict:
-        ctx = EpisodeFiles.discover(
-            episode_dir,
-            episode_id,
-            config=self.config,
-            source_video=source_video,
-            chs_subtitle=chs_subtitle,
-            cht_subtitle=cht_subtitle,
-        )
-        if ensure_cht:
-            ensure_result = self.validator.ensure_episode_subtitles(
-                episode_dir,
-                episode_id,
-                source_video=source_video,
-                chs_subtitle=chs_subtitle,
-                cht_subtitle=cht_subtitle,
-                converter=converter,
-                api_url=api_url,
-                timeout=timeout,
-                regenerate_cht=regenerate_cht,
-                full_file=full_file,
-                fallback_to_full_file=fallback_to_full_file,
-                standardize=True,
-            )
+    def validate_subtitles(
+        self,
+        episode_dir: Path | str,
+        episode_id: str,
+        source_video: Path | str | None = None,
+        chs_subtitle: Path | str | None = None,
+        cht_subtitle: Path | str | None = None,
+        ensure_cht: bool = False,
+        converter: str | None = None,
+        api_url: str | None = None,
+        timeout: int | None = None,
+        regenerate_cht: bool | None = None,
+        full_file: bool = False,
+        fallback_to_full_file: bool = False,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        del source_video, fallback_to_full_file
+        workspace = Path(episode_dir).expanduser().resolve()
+        chs = Path(chs_subtitle).expanduser().resolve() if chs_subtitle else self._discover(workspace, episode_id, "chs")
+        cht = Path(cht_subtitle).expanduser().resolve() if cht_subtitle else self._discover(workspace, episode_id, "cht")
+        if chs is None:
             return {
-                "all_ok": ensure_result["all_ok"],
-                "standardized": [path.name for path in ensure_result["standardized"]],
-                "missing": list(ensure_result["missing"]),
-                "generated_cht": str(ensure_result["generated_cht"]) if ensure_result["generated_cht"] else None,
-                "backed_up": [str(path) for path in ensure_result["backed_up"]],
-                "validated": [str(path) for path in ensure_result["validated"]],
+                "all_ok": False, "standardized": [],
+                "missing": [f"{episode_id}.chs&jpn.ass"], "generated_cht": None,
+                "backed_up": [], "validated": [str(cht)] if cht else [],
+                "run_id": None, "stage": None, "status": "failed",
+                "diagnostics": [],
+                "error": {"code": "input_missing", "message": "Simplified Chinese subtitle is missing", "retryable": False, "details": {}},
+                "retryable": False, "needs_review": False, "reused": False, "artifacts": [],
             }
-
-        result = {"all_ok": True, "standardized": [], "missing": []}
-        for sub_path in ctx.all_subs:
-            violations = self.validator.validate_ass_header(sub_path)
-            if violations:
-                print(f"📝 标准化 {sub_path.name}: {list(violations.keys())}")
-                self.validator.standardize_ass(sub_path)
-                result["standardized"].append(sub_path.name)
-
-        if not ctx.all_subs:
-            result["all_ok"] = False
-            missing_labels = []
-            if chs_subtitle is not None:
-                missing_labels.append(str(Path(chs_subtitle)))
-            else:
-                missing_labels.append(f"{episode_id}.chs&jpn.ass")
-            if cht_subtitle is not None:
-                missing_labels.append(str(Path(cht_subtitle)))
-            else:
-                missing_labels.append(f"{episode_id}.cht&jpn.ass")
-            result["missing"] = missing_labels
-            print("⚠️  未找到字幕文件！后续封装将需要:")
-            for missing in result["missing"]:
-                print(f"    - {missing}")
-
-        return result
-
-    def package_episode(self, episode_dir: Path | str, episode_id: str,
-                        mkv_template: str | None = None,
-                        chs_template: str | None = None,
-                        cht_template: str | None = None,
-                        prefix_chs: str | None = None,
-                        prefix_cht: str | None = None,
-                        project: ProjectNaming | None = None,
-                        source_video: Path | str | None = None,
-                        chs_subtitle: Path | str | None = None,
-                        cht_subtitle: Path | str | None = None) -> list[Path]:
-        packager = Packager(
-            episode_dir,
-            episode_id,
-            self.config,
-            source_video=source_video,
-            chs_subtitle=chs_subtitle,
-            cht_subtitle=cht_subtitle,
+        target = cht or derive_cht_path(chs)
+        if not ensure_cht:
+            return {
+                "all_ok": target.exists(), "standardized": [],
+                "missing": [] if target.exists() else [target.name],
+                "generated_cht": None, "backed_up": [],
+                "validated": [str(path) for path in (chs, target) if path.exists()],
+                "run_id": None, "stage": None,
+                "status": "succeeded" if target.exists() else "failed",
+                "diagnostics": [], "error": None, "retryable": False,
+                "needs_review": False, "reused": False, "artifacts": [],
+            }
+        rerun = force or regenerate_cht is True
+        result = run_subtitle_conversion(
+            chs, target,
+            workspace=workspace,
+            episode_id=episode_id,
+            options=SubtitleConversionOptions(
+                converter=converter or "Taiwan",
+                api_url=api_url or "https://api.zhconvert.org/convert",
+                timeout=timeout if timeout is not None else 60,
+                full_file=full_file,
+            ),
+            provider=self.provider,
+            store=self.store,
+            state_dir=self.state_dir,
+            force=rerun,
         )
-        if not all([mkv_template, chs_template, cht_template]):
-            return packager.package_expected(prefix_chs=prefix_chs, prefix_cht=prefix_cht, project=project)
-        return packager.package_all(mkv_template, chs_template, cht_template)
+        return self._result_payload(result, chs=chs, cht=target)
 
-    def upload_files_to_r2(self, file_paths: list[str | Path], remote_folder: str = "",
-                           uploader: R2Uploader | None = None, **r2_kwargs) -> dict:
-        uploader = uploader or R2Uploader(**r2_kwargs)
-        uploaded_keys = uploader.upload_files(file_paths, remote_folder=remote_folder)
+    def register_video(
+        self,
+        video: Path | str,
+        *,
+        workspace: Path | str,
+        episode_id: str,
+        purposes: list[str] | tuple[str, ...],
+        default_for: list[str] | tuple[str, ...] = (),
+        reference: bool = False,
+        ffprobe: Path | str = "ffprobe",
+        probe_timeout: float = 30.0,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        result = run_video_registration(
+            video,
+            workspace=workspace,
+            episode_id=episode_id,
+            options=VideoRegistrationOptions(
+                purposes=tuple(VideoPurpose(item) for item in purposes),
+                default_for=tuple(VideoPurpose(item) for item in default_for),
+                reference=reference,
+            ),
+            probe=FFprobeClient(ffprobe, timeout=probe_timeout),
+            store=self.store,
+            state_dir=self.state_dir,
+            force=force,
+        )
+        return result.to_dict()
+
+    def get_asset(self, artifact_id: str, *, workspace: Path | str) -> dict[str, Any] | None:
+        store = self.store or SQLiteJobStore.for_workspace(workspace, self.state_dir)
+        store.initialize()
+        artifact = get_current_artifact(store, artifact_id)
+        return artifact.to_dict() if artifact else None
+
+    def list_assets(self, *, workspace: Path | str, episode_id: str | None = None,
+                    artifact_type: str | None = None) -> list[dict[str, Any]]:
+        store = self.store or SQLiteJobStore.for_workspace(workspace, self.state_dir)
+        store.initialize()
+        return [
+            item.to_dict() for item in list_current_artifacts(
+                store, episode_id=episode_id, artifact_type=artifact_type
+            )
+        ]
+
+    def resolve_video(self, *, workspace: Path | str, episode_id: str,
+                      purpose: str) -> dict[str, Any]:
+        store = self.store or SQLiteJobStore.for_workspace(workspace, self.state_dir)
+        store.initialize()
+        artifact, ambiguous = resolve_registered_video(
+            store, episode_id, VideoPurpose(purpose)
+        )
         return {
-            "bucket_name": uploader.bucket_name,
-            "remote_folder": remote_folder.strip("/"),
-            "uploaded_keys": uploaded_keys,
+            "status": "needs_review" if ambiguous else "succeeded",
+            "needs_review": ambiguous,
+            "artifact": artifact.to_dict() if artifact else None,
         }
 
-    def seed_torrents(self, files: list[Path], qb_host: str,
-                      qb_user: str = "admin", qb_pass: str = "",
-                      download_base: str = "/downloads") -> dict[str, bool]:
-        return Publisher.seed_qbittorrent(
-            host=qb_host,
-            files=files,
-            download_base=download_base,
-            username=qb_user,
-            password=qb_pass,
+    def register_source_asset(
+        self, path: Path | str, *, workspace: Path | str, episode_id: str,
+        kind: str, language: str | None = None, force: bool = False,
+    ) -> dict[str, Any]:
+        result = run_source_asset_registration(
+            path, workspace=workspace, episode_id=episode_id,
+            options=SourceAssetRegistrationOptions(
+                kind=SourceAssetKind(kind), language=language,
+            ),
+            store=self.store, state_dir=self.state_dir, force=force,
+        )
+        return result.to_dict()
+
+    def register_subtitle(self, subtitle: Path | str, *, workspace: Path | str,
+                          episode_id: str, language: str | None = None,
+                          force: bool = False) -> dict[str, Any]:
+        return self.register_source_asset(
+            subtitle, workspace=workspace, episode_id=episode_id,
+            kind="subtitle", language=language, force=force,
         )
 
-    def process_episode(self, episode_dir: Path | str,
-                        episode_id: str | None = None,
-                        manual_cuts: dict | None = None,
-                        direct_model: str | None = None,
-                        chunked_model: str | None = None,
-                        mkv_template: str | None = None,
-                        chs_template: str | None = None,
-                        cht_template: str | None = None,
-                        prefix_chs: str | None = None,
-                        prefix_cht: str | None = None,
-                        project: ProjectNaming | None = None,
-                        source_video: Path | str | None = None,
-                        chs_subtitle: Path | str | None = None,
-                        cht_subtitle: Path | str | None = None,
-                        r2_prefix: str | None = None,
-                        r2_uploader: R2Uploader | None = None,
-                        qb_host: str | None = None,
-                        skip_transcribe: bool = False,
-                        skip_encode: bool = False,
-                        skip_package: bool = False,
-                        skip_upload: bool = False,
-                        skip_seed: bool = False) -> dict:
-        directory = Path(episode_dir)
-        if episode_id is None:
-            if source_video is not None:
-                raise ValueError("传入 source_video 时必须显式指定 episode_id")
-            mkvs = list(directory.glob("*.mkv"))
-            digits = [m.stem for m in mkvs if re.match(r"^\d+$", m.stem) and "_HEVC10bit" not in m.stem]
-            episode_id = digits[0] if digits else None
-            if not episode_id:
-                raise ValueError("无法推断 episode_id，请显式指定")
+    def register_font(self, font: Path | str, *, workspace: Path | str,
+                      episode_id: str, force: bool = False) -> dict[str, Any]:
+        return self.register_source_asset(
+            font, workspace=workspace, episode_id=episode_id,
+            kind="font", force=force,
+        )
 
-        cuts = (manual_cuts or {}).get(episode_id)
-        result: dict = {"episode_id": episode_id, "stages": {}}
-        timer = PipelineTimer(f"EP{episode_id}")
+    def register_chapter(self, chapter: Path | str, *, workspace: Path | str,
+                         episode_id: str, language: str | None = None,
+                         force: bool = False) -> dict[str, Any]:
+        return self.register_source_asset(
+            chapter, workspace=workspace, episode_id=episode_id,
+            kind="chapter", language=language, force=force,
+        )
 
-        print(f"\n{'=' * 50}\n📦 阶段 1: 素材提取 EP{episode_id}\n{'=' * 50}")
-        with timer.stage("1.素材提取"):
-            extract_result = {
-                "audio": self.extract_audio(
-                    directory,
-                    episode_id,
-                    source_video=source_video,
-                    chs_subtitle=chs_subtitle,
-                    cht_subtitle=cht_subtitle,
-                ),
-                "subtitles": self.extract_subtitles(
-                    directory,
-                    episode_id,
-                    smart=True,
-                    source_video=source_video,
-                    chs_subtitle=chs_subtitle,
-                    cht_subtitle=cht_subtitle,
-                ),
-            }
-            result["stages"]["extract"] = extract_result
+    def register_attachment(self, attachment: Path | str, *, workspace: Path | str,
+                            episode_id: str, force: bool = False) -> dict[str, Any]:
+        return self.register_source_asset(
+            attachment, workspace=workspace, episode_id=episode_id,
+            kind="attachment", force=force,
+        )
 
-        if not skip_transcribe:
-            print(f"\n{'=' * 50}\n🎙️  阶段 2: AI 转录 EP{episode_id}\n{'=' * 50}")
-            with timer.stage("2.AI转录"):
-                transcribe_result = self.transcribe_episode(
-                    directory,
-                    episode_id,
-                    direct_model=direct_model,
-                    chunked_model=chunked_model,
-                    manual_cuts=cuts,
-                    source_video=source_video,
-                    chs_subtitle=chs_subtitle,
-                    cht_subtitle=cht_subtitle,
+    def match_assets(self, *, workspace: Path | str, episode_id: str,
+                     video_artifact_id: str,
+                     roles: list[str] | tuple[str, ...] = (
+                         "subtitle", "font", "chapter", "attachment",
+                     ), force: bool = False,
+                     replace_confirmed: bool = False) -> dict[str, Any]:
+        result = run_asset_matching(
+            workspace=workspace, episode_id=episode_id,
+            anchor_artifact_id=video_artifact_id, roles=tuple(roles),
+            store=self.store, state_dir=self.state_dir, force=force,
+            replace_confirmed=replace_confirmed,
+        )
+        payload = result.to_dict()
+        store = self.store or SQLiteJobStore.for_workspace(workspace, self.state_dir)
+        payload["matches"] = [
+            item.to_dict() for item in store.list_current_match_sets(episode_id)
+            if item.anchor_artifact_id == video_artifact_id and item.input_role in roles
+        ]
+        return payload
+
+    def confirm_asset_match(self, *, workspace: Path | str, episode_id: str,
+                            video_artifact_id: str, role: str,
+                            artifact_ids: list[str] | tuple[str, ...],
+                            force: bool = False) -> dict[str, Any]:
+        result = run_match_confirmation(
+            workspace=workspace, episode_id=episode_id,
+            anchor_artifact_id=video_artifact_id, role=role,
+            artifact_ids=tuple(artifact_ids), store=self.store,
+            state_dir=self.state_dir, force=force,
+        )
+        payload = result.to_dict()
+        store = self.store or SQLiteJobStore.for_workspace(workspace, self.state_dir)
+        match_set = store.get_current_match_set(episode_id, video_artifact_id, role)
+        payload["match"] = match_set.to_dict() if match_set else None
+        return payload
+
+    def get_episode_manifest(self, *, workspace: Path | str,
+                             episode_id: str) -> dict[str, Any]:
+        store = self.store or SQLiteJobStore.for_workspace(workspace, self.state_dir)
+        store.initialize()
+        return episode_manifest(store, episode_id)
+
+    def list_media_tracks(self, *, workspace: Path | str, episode_id: str,
+                          video_artifact_id: str | None = None,
+                          purpose: str | None = None,
+                          kind: str | None = None) -> dict[str, Any]:
+        return list_registered_media_tracks(
+            workspace=workspace, episode_id=episode_id,
+            video_artifact_id=video_artifact_id, purpose=purpose,
+            kind=TrackKind(kind) if kind else None,
+            store=self.store, state_dir=self.state_dir,
+        )
+
+    def extract_audio_track(self, *, workspace: Path | str, episode_id: str,
+                            video_artifact_id: str | None = None,
+                            purpose: str | None = None,
+                            stream_index: int | None = None,
+                            language: str | None = None,
+                            mode: str = "both",
+                            output_dir: Path | str | None = None,
+                            ffmpeg: Path | str = "ffmpeg",
+                            ffprobe: Path | str = "ffprobe",
+                            process_timeout: float = 600.0,
+                            probe_timeout: float = 30.0,
+                            force: bool = False) -> dict[str, Any]:
+        return run_audio_extraction(
+            workspace=workspace, episode_id=episode_id,
+            video_artifact_id=video_artifact_id, purpose=purpose,
+            stream_index=stream_index, language=language,
+            mode=AudioOutputMode(mode), output_dir=output_dir,
+            ffmpeg=ffmpeg, ffprobe=ffprobe,
+            process_timeout=process_timeout, probe_timeout=probe_timeout,
+            store=self.store, state_dir=self.state_dir, force=force,
+        ).to_dict()
+
+    def extract_subtitle_track(self, *, workspace: Path | str, episode_id: str,
+                               video_artifact_id: str | None = None,
+                               purpose: str | None = None,
+                               stream_index: int | None = None,
+                               language: str | None = None,
+                               output_dir: Path | str | None = None,
+                               ffmpeg: Path | str = "ffmpeg",
+                               ffprobe: Path | str = "ffprobe",
+                               process_timeout: float = 300.0,
+                               probe_timeout: float = 30.0,
+                               force: bool = False) -> dict[str, Any]:
+        return run_subtitle_extraction(
+            workspace=workspace, episode_id=episode_id,
+            video_artifact_id=video_artifact_id, purpose=purpose,
+            stream_index=stream_index, language=language,
+            output_dir=output_dir, ffmpeg=ffmpeg, ffprobe=ffprobe,
+            process_timeout=process_timeout, probe_timeout=probe_timeout,
+            store=self.store, state_dir=self.state_dir, force=force,
+        ).to_dict()
+
+    def extract_attachments(self, *, workspace: Path | str, episode_id: str,
+                            video_artifact_id: str | None = None,
+                            purpose: str | None = None,
+                            output_dir: Path | str | None = None,
+                            ffmpeg: Path | str = "ffmpeg",
+                            ffprobe: Path | str = "ffprobe",
+                            process_timeout: float = 300.0,
+                            probe_timeout: float = 30.0,
+                            force: bool = False) -> dict[str, Any]:
+        return run_attachment_extraction(
+            workspace=workspace, episode_id=episode_id,
+            video_artifact_id=video_artifact_id, purpose=purpose,
+            output_dir=output_dir, ffmpeg=ffmpeg, ffprobe=ffprobe,
+            process_timeout=process_timeout, probe_timeout=probe_timeout,
+            store=self.store, state_dir=self.state_dir, force=force,
+        ).to_dict()
+
+    def transcribe(self, *, workspace: Path | str, episode_id: str,
+                   audio_artifact_id: str, mode: str = "direct",
+                   model: str = "mlx-community/whisper-large-v3-turbo",
+                   model_revision: str = "main", language: str = "ja",
+                   chunk_seconds: float = 240.0, overlap_seconds: float = 5.0,
+                   manual_cuts: tuple[float, ...] | list[float] = (),
+                   throttle_seconds: float = 0.0,
+                   decoding: dict[str, Any] | None = None,
+                   output_dir: Path | str | None = None,
+                   ffmpeg: Path | str = "ffmpeg",
+                   process_timeout: float = 600.0,
+                   force: bool = False) -> dict[str, Any]:
+        return run_transcription(
+            workspace=workspace, episode_id=episode_id,
+            audio_artifact_id=audio_artifact_id,
+            options=TranscriptionOptions(
+                mode=TranscriptionMode(mode), model=model,
+                model_revision=model_revision, language=language,
+                chunk_seconds=chunk_seconds, overlap_seconds=overlap_seconds,
+                manual_cuts=tuple(manual_cuts), throttle_seconds=throttle_seconds,
+                decoding=decoding or {},
+            ),
+            output_dir=output_dir, ffmpeg=ffmpeg,
+            process_timeout=process_timeout, store=self.store,
+            state_dir=self.state_dir, force=force,
+        ).to_dict()
+
+    def analyze_ass(
+        self, *, workspace: Path | str, episode_id: str,
+        subtitle_artifact_id: str, video_artifact_id: str | None = None,
+        font_artifact_ids: tuple[str, ...] = (),
+        profile: AssAnalysisProfile | dict[str, Any] | None = None,
+        output: Path | str | None = None, force: bool = False,
+    ) -> dict[str, Any]:
+        return run_ass_analysis(
+            workspace=workspace, episode_id=episode_id,
+            subtitle_artifact_id=subtitle_artifact_id,
+            video_artifact_id=video_artifact_id,
+            font_artifact_ids=font_artifact_ids, profile=profile, output=output,
+            store=self.store, state_dir=self.state_dir, force=force,
+        ).to_dict()
+
+    def normalize_ass(
+        self, *, workspace: Path | str, episode_id: str,
+        subtitle_artifact_id: str, video_artifact_id: str | None = None,
+        font_artifact_ids: tuple[str, ...] = (),
+        profile: AssAnalysisProfile | dict[str, Any] | None = None,
+        output: Path | str | None = None,
+        analysis_output: Path | str | None = None, force: bool = False,
+    ) -> dict[str, Any]:
+        return run_ass_normalization(
+            workspace=workspace, episode_id=episode_id,
+            subtitle_artifact_id=subtitle_artifact_id,
+            video_artifact_id=video_artifact_id,
+            font_artifact_ids=font_artifact_ids, profile=profile, output=output,
+            analysis_output=analysis_output, store=self.store,
+            state_dir=self.state_dir, force=force,
+        ).to_dict()
+
+    def reconstruct_ass(
+        self, *, workspace: Path | str, episode_id: str,
+        analysis_artifact_id: str,
+        profile: AssReconstructionProfile | dict[str, Any] | None = None,
+        output: Path | str | None = None, force: bool = False,
+    ) -> dict[str, Any]:
+        return run_ass_reconstruction(
+            workspace=workspace, episode_id=episode_id,
+            analysis_artifact_id=analysis_artifact_id, profile=profile,
+            output=output, store=self.store, state_dir=self.state_dir, force=force,
+        ).to_dict()
+
+    def load_ass_analysis(self, value: Path | str | dict[str, Any], *,
+                          allow_legacy: bool = True) -> dict[str, Any]:
+        return load_analysis(value, allow_legacy=allow_legacy)
+
+    def export_ass_analysis(self, value: Path | str | dict[str, Any], target: Path | str,
+                            *, overwrite: bool = False) -> str:
+        payload = load_analysis(value)
+        return str(export_analysis(payload, target, overwrite=overwrite))
+
+    def combine_ass_analyses(
+        self, values: list[Path | str | dict[str, Any]] | tuple[Path | str | dict[str, Any], ...],
+        *, output: Path | str | None = None, overwrite: bool = False,
+    ) -> dict[str, Any]:
+        bundle = combine_analyses(values)
+        if output is not None:
+            export_analysis_bundle(bundle, output, overwrite=overwrite)
+        return bundle
+
+    def load_ass_analysis_bundle(self, value: Path | str | dict[str, Any]) -> dict[str, Any]:
+        return load_analysis_bundle(value)
+
+    def index_ass_analysis_events(
+        self, value: Path | str | dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        return index_analysis_events(load_analysis(value))
+
+    def get_ass_analysis_event(
+        self, value_or_index: Path | str | dict[str, Any], event_id: str,
+    ) -> dict[str, Any] | None:
+        if isinstance(value_or_index, (str, Path)):
+            value_or_index = load_analysis(value_or_index)
+        return get_analysis_event(value_or_index, event_id)
+
+    def index_ass_analysis_bundle_events(
+        self, value: Path | str | dict[str, Any],
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        return index_bundle_events(load_analysis_bundle(value))
+
+    def get_ass_analysis_bundle_event(
+        self, value_or_index: Path | str | dict[str, Any],
+        source_artifact_id: str, event_id: str,
+    ) -> dict[str, Any] | None:
+        if isinstance(value_or_index, (str, Path)):
+            value_or_index = load_analysis_bundle(value_or_index)
+        return get_bundle_event(value_or_index, source_artifact_id, event_id)
+
+    def create_production_request(
+        self, *, workspace: Path | str, episode_id: str, operation: str,
+        video_artifact_id: str, subtitle_artifact_id: str | None = None,
+        subtitle_artifact_ids: tuple[str, ...] = (), font_artifact_ids: tuple[str, ...] = (),
+        chapter_artifact_id: str | None = None,
+        attachment_artifact_ids: tuple[str, ...] = (), output_profile: str = "hevc-10bit",
+        output_target: Path | str | None = None,
+        parameters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        request = create_production_request(
+            workspace=workspace, episode_id=episode_id,
+            operation=ProductionOperation(operation),
+            video_artifact_id=video_artifact_id,
+            subtitle_artifact_id=subtitle_artifact_id,
+            subtitle_artifact_ids=subtitle_artifact_ids,
+            font_artifact_ids=font_artifact_ids,
+            chapter_artifact_id=chapter_artifact_id,
+            attachment_artifact_ids=attachment_artifact_ids,
+            output_profile=output_profile, output_target=output_target,
+            parameters=parameters, store=self.store, state_dir=self.state_dir,
+        )
+        return {"status": "succeeded", "request": request.to_dict()}
+
+    def get_production_request(self, request_id: str, *,
+                               workspace: Path | str) -> dict[str, Any] | None:
+        store = self.store or SQLiteJobStore.for_workspace(workspace, self.state_dir)
+        store.initialize()
+        request = store.get_production_request(request_id)
+        return request.to_dict() if request else None
+
+    def list_production_requests(self, *, workspace: Path | str,
+                                 episode_id: str | None = None) -> list[dict[str, Any]]:
+        store = self.store or SQLiteJobStore.for_workspace(workspace, self.state_dir)
+        store.initialize()
+        return [
+            item.to_dict() for item in store.list_production_requests(episode_id=episode_id)
+        ]
+
+    def execute_production_request(
+        self, request_id: str, *, workspace: Path | str,
+        ffmpeg: Path | str = "ffmpeg", ffprobe: Path | str = "ffprobe",
+        mkvmerge: Path | str = "mkvmerge", process_timeout: float = 7200.0, probe_timeout: float = 30.0,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        result = run_production_request(
+            request_id, workspace=workspace, ffmpeg=ffmpeg, ffprobe=ffprobe,
+            mkvmerge=mkvmerge, process_timeout=process_timeout, probe_timeout=probe_timeout,
+            store=self.store, state_dir=self.state_dir, force=force,
+        )
+        payload = result.to_dict()
+        payload["request"] = self.get_production_request(request_id, workspace=workspace)
+        return payload
+
+    def create_torrent(
+        self, *, workspace: Path | str, episode_id: str,
+        content_artifact_id: str,
+        profile: TorrentProfile | dict[str, Any] | None = None,
+        output: Path | str | None = None,
+        tracker_timeout: float | None = None,
+        tracker_client: TrackerListClient | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        return run_torrent_creation(
+            workspace=workspace,
+            episode_id=episode_id,
+            content_artifact_id=content_artifact_id,
+            profile=profile,
+            output=output,
+            tracker_timeout=tracker_timeout,
+            tracker_client=tracker_client,
+            store=self.store,
+            state_dir=self.state_dir,
+            force=force,
+        ).to_dict()
+
+    def upload_r2(
+        self, *, workspace: Path | str, episode_id: str, artifact_id: str,
+        profile: R2UploadProfile | dict[str, Any], client: R2Client | None = None,
+        account_id_env: str = "R2_ACCOUNT_ID", access_key_env: str = "R2_ACCESS_KEY_ID",
+        secret_key_env: str = "R2_SECRET_ACCESS_KEY", endpoint_env: str = "R2_ENDPOINT",
+        credential_file: Path | str | None = None,
+        credential_manifest: Path | str | None = None,
+        credential_profile: str | None = None,
+        secret_store: SecretStore | None = None, force: bool = False,
+    ) -> dict[str, Any]:
+        if credential_profile is None and credential_manifest is not None:
+            raise ValueError("R2 credential manifest requires a profile alias")
+        credentials = None
+        if client is None:
+            if credential_profile is not None:
+                service = self.credential_service or CredentialService(
+                    manifest_path=credential_manifest, secret_store=secret_store,
                 )
-                result["stages"]["transcribe"] = {
-                    "ok": transcribe_result["ok"],
-                    "direct": str(transcribe_result["direct"]) if transcribe_result["direct"] else None,
-                    "chunked": str(transcribe_result["chunked"]) if transcribe_result["chunked"] else None,
-                }
-        else:
-            result["stages"]["transcribe"] = "skipped"
-
-        if not skip_encode:
-            print(f"\n{'=' * 50}\n🎬 阶段 3: HEVC 编码 EP{episode_id}\n{'=' * 50}")
-            with timer.stage("3.HEVC编码"):
-                hevc_path = self.encode_episode(
-                    directory,
-                    episode_id,
-                    source_video=source_video,
-                    chs_subtitle=chs_subtitle,
-                    cht_subtitle=cht_subtitle,
+                credentials = service.resolve_r2(credential_profile)
+            else:
+                credentials = resolve_r2_credentials(
+                    account_id_env=account_id_env, access_key_env=access_key_env,
+                    secret_key_env=secret_key_env, endpoint_env=endpoint_env,
+                    config_path=credential_file, environment=None,
                 )
-                result["stages"]["encode"] = str(hevc_path)
-        else:
-            result["stages"]["encode"] = "skipped"
+            client = Boto3R2Client(credentials)
+        credential_reference = (
+            credentials.reference if credentials is not None
+            else f"injected:{type(client).__name__}"
+        )
+        return run_r2_upload(
+            workspace=workspace, episode_id=episode_id, artifact_id=artifact_id,
+            profile=profile, client=client, credential_reference=credential_reference,
+            store=self.store, state_dir=self.state_dir, force=force,
+        ).to_dict()
 
-        print(f"\n{'=' * 50}\n📝 阶段 4: 字幕校验 EP{episode_id}\n{'=' * 50}")
-        with timer.stage("4.字幕校验"):
-            result["stages"]["subtitles"] = self.validate_subtitles(
-                directory,
-                episode_id,
-                source_video=source_video,
-                chs_subtitle=chs_subtitle,
-                cht_subtitle=cht_subtitle,
+    def pull_remote(
+        self, *, workspace: Path | str, episode_id: str, content_artifact_id: str,
+        r2_receipt_artifact_id: str, profile: RemotePullProfile | dict[str, Any],
+        client: RemotePullClient | None = None, ssh: Path | str = "ssh",
+        connection_manifest: Path | str | None = None, ssh_profile: str | None = None,
+        ssh_resolver: SSHConfigResolver | None = None, force: bool = False,
+    ) -> dict[str, Any]:
+        if connection_manifest is not None or ssh_profile is not None:
+            if ssh_profile is None:
+                raise ValueError("connection manifest requires an SSH profile")
+            service = self.credential_service or CredentialService(
+                manifest_path=connection_manifest, ssh_resolver=ssh_resolver,
             )
+            ssh_alias, _ = service.resolve_ssh(ssh_profile)
+            profile_data = profile.normalized() if isinstance(profile, RemotePullProfile) else dict(profile)
+            profile_data.pop("version", None)
+            configured = profile_data.get("ssh_alias")
+            if configured not in {None, ssh_alias}:
+                raise ValueError("remote pull profile SSH alias conflicts with connection manifest")
+            profile_data["ssh_alias"] = ssh_alias
+            profile = RemotePullProfile.from_mapping(profile_data)
+        active_client = client or SSHRclonePullClient(ssh=ssh)
+        return run_remote_pull(
+            workspace=workspace, episode_id=episode_id,
+            content_artifact_id=content_artifact_id,
+            r2_receipt_artifact_id=r2_receipt_artifact_id,
+            profile=profile, client=active_client, store=self.store,
+            state_dir=self.state_dir, force=force,
+        ).to_dict()
 
-        if not skip_package:
-            print(f"\n{'=' * 50}\n📦 阶段 5: 封装 EP{episode_id}\n{'=' * 50}")
-            with timer.stage("5.封装"):
-                try:
-                    pkg_files = self.package_episode(
-                        directory,
-                        episode_id,
-                        mkv_template=mkv_template,
-                        chs_template=chs_template,
-                        cht_template=cht_template,
-                        prefix_chs=prefix_chs,
-                        prefix_cht=prefix_cht,
-                        project=project,
-                        source_video=source_video,
-                        chs_subtitle=chs_subtitle,
-                        cht_subtitle=cht_subtitle,
-                    )
-                    result["stages"]["package"] = [str(path) for path in pkg_files]
-                except PackagingError as e:
-                    result["stages"]["package"] = f"FAILED: {e}"
-                    print(f"❌ 封装失败: {e}")
+    def seed_qbittorrent(
+        self, *, workspace: Path | str, episode_id: str,
+        torrent_artifact_id: str, content_artifact_id: str,
+        remote_content_artifact_id: str,
+        profile: QBittorrentSeedProfile | dict[str, Any],
+        client: QBittorrentClient | None = None, ssh: Path | str = "ssh",
+        username_env: str = "QB_USERNAME", password_env: str = "QB_PASSWORD",
+        credential_file: Path | str | None = None,
+        credential_manifest: Path | str | None = None,
+        credential_profile: str | None = None,
+        connection_manifest: Path | str | None = None, ssh_profile: str | None = None,
+        secret_store: SecretStore | None = None,
+        ssh_resolver: SSHConfigResolver | None = None, force: bool = False,
+    ) -> dict[str, Any]:
+        if connection_manifest is not None or ssh_profile is not None:
+            if ssh_profile is None:
+                raise ValueError("connection manifest requires an SSH profile")
+            service = self.credential_service or CredentialService(
+                manifest_path=connection_manifest, ssh_resolver=ssh_resolver,
+            )
+            ssh_alias, _ = service.resolve_ssh(ssh_profile)
+            profile_data = profile.normalized() if isinstance(profile, QBittorrentSeedProfile) else dict(profile)
+            profile_data.pop("version", None)
+            configured = profile_data.get("ssh_alias")
+            if configured not in {None, ssh_alias}:
+                raise ValueError("qBittorrent profile SSH alias conflicts with connection manifest")
+            profile_data["ssh_alias"] = ssh_alias
+            profile = QBittorrentSeedProfile.from_mapping(profile_data)
+        if credential_profile is None and credential_manifest is not None:
+            raise ValueError("qBittorrent credential manifest requires a profile alias")
+        credentials = None
+        if client is None:
+            if credential_profile is not None:
+                service = self.credential_service or CredentialService(
+                    manifest_path=credential_manifest, secret_store=secret_store,
+                    ssh_resolver=ssh_resolver,
+                )
+                credentials = service.resolve_qbittorrent(credential_profile)
+            else:
+                credentials = resolve_qbittorrent_credentials(
+                    username_env=username_env, password_env=password_env,
+                    config_path=credential_file,
+                )
+            client = SSHQBittorrentClient(credentials, ssh=ssh)
+        credential_reference = (
+            credentials.reference if credentials is not None
+            else f"injected:{type(client).__name__}"
+        )
+        return run_qbittorrent_seed(
+            workspace=workspace, episode_id=episode_id,
+            torrent_artifact_id=torrent_artifact_id,
+            content_artifact_id=content_artifact_id,
+            remote_content_artifact_id=remote_content_artifact_id,
+            profile=profile, client=client, credential_reference=credential_reference,
+            store=self.store, state_dir=self.state_dir, force=force,
+        ).to_dict()
 
-        if not skip_upload:
-            pkg_files = result["stages"].get("package", [])
-            upload_prefix = r2_prefix if r2_prefix is not None else getattr(self.config, "r2_prefix", "")
-            if isinstance(pkg_files, list) and pkg_files:
-                print(f"\n{'=' * 50}\n☁️  阶段 6: R2 上传 EP{episode_id}\n{'=' * 50}")
-                with timer.stage("6.R2上传"):
-                    upload_result = self.upload_files_to_r2(
-                        [Path(path) for path in pkg_files],
-                        remote_folder=upload_prefix,
-                        uploader=r2_uploader,
-                    )
-                    result["stages"]["upload"] = upload_result
+    def publish_anibt(
+        self, *, workspace: Path | str, episode_id: str,
+        torrent_artifact_id: str,
+        profile: AnibtPublishProfile | dict[str, Any],
+        client: "AnibtClient | None" = None,  # type: ignore[name-defined]
+        token: str | None = None,
+        token_env: str = "ANIBT_TOKEN",
+        config_file: Path | str | None = None,
+        credential_manifest: Path | str | None = None,
+        credential_profile: str | None = None,
+        secret_store: SecretStore | None = None,
+        api_url: str | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        from .release.anibt import AnibtClient, RequestsAnibtClient
+        if credential_profile is not None:
+            service = self.credential_service or CredentialService(
+                manifest_path=credential_manifest, secret_store=secret_store,
+            )
+            credentials = service.resolve_anibt(credential_profile, api_url=api_url)
+        else:
+            if credential_manifest is not None:
+                raise ValueError("Anibt credential manifest requires a profile alias")
+            credentials = resolve_anibt_credentials(
+                token=token, token_env=token_env, config_path=config_file,
+                api_url=api_url,
+            )
+        active_client = client or RequestsAnibtClient()
+        return run_anibt_publish(
+            workspace=workspace, episode_id=episode_id,
+            torrent_artifact_id=torrent_artifact_id,
+            profile=profile, client=active_client,
+            credential_reference=credentials.reference,
+            api_url=credentials.api_url, token=credentials.token,
+            store=self.store, state_dir=self.state_dir, force=force,
+        ).to_dict()
 
-        if not skip_seed and qb_host:
-            pkg_files = result["stages"].get("package", [])
-            if isinstance(pkg_files, list) and pkg_files:
-                print(f"\n{'=' * 50}\n🌐 阶段 7: 做种 EP{episode_id}\n{'=' * 50}")
-                with timer.stage("7.做种"):
-                    result["stages"]["seed"] = self.seed_torrents([Path(path) for path in pkg_files], qb_host)
-
-        print(f"\n✨ EP{episode_id} 全流程完成")
-        timer.summary()
-        return result
-
-    @staticmethod
-    def _single_episode_dir(workstation: WorkstationConfig, episode_id: str) -> Path:
-        candidate = workstation.root_dir / episode_id
-        return candidate if candidate.is_dir() else workstation.raw_dir
-
-    @staticmethod
-    def _normalize_workstation(workstation: WorkstationConfig | Path | str, **kwargs) -> WorkstationConfig:
-        if isinstance(workstation, WorkstationConfig):
-            return workstation
-        return WorkstationConfig(root_dir=Path(workstation), **kwargs)
+    def get_run(self, run_id: str, *, workspace: Path | str) -> dict[str, Any] | None:
+        store = self.store or SQLiteJobStore.for_workspace(workspace, self.state_dir)
+        return store.get_run_detail(run_id)

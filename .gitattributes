@@ -1,0 +1,32 @@
+* text=auto eol=lf
+
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.sqlite binary
+*.sqlite3 binary
+*.db binary
+*.mkv binary
+*.mp4 binary
+*.mov binary
+*.mka binary
+*.wav binary
+*.flac binary
+*.torrent binary
+*.ttf binary
+*.otf binary
+*.ttc binary
+
+tools/ export-ignore
+.gitignore export-ignore
+.gitattributes export-ignore

@@ -1,42 +1,86 @@
-# Python
+# Python bytecode and build products
 __pycache__/
 *.py[cod]
-*.so
+*$py.class
 *.egg-info/
-dist/
-build/
-*.egg
 .eggs/
+build/
+dist/
+wheels/
+*.whl
+*.egg
 
-# Virtual environments
+# Test, type-check, coverage, and environment caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
 .venv/
 venv/
-.env
 
-# IDE
+# macOS and editors
+.DS_Store
+.AppleDouble
+.LSOverride
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# macOS
-.DS_Store
-
-# Project specific
-_backup/
-output_transcripts/
+# bmlsub local state, logs, backups, and generated validation data
+.bmlsub/
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.log
 *.tmp
 *.bak
+*.orig
+backups/
+benchmark-results/
+validation-results/
 
-# Secrets
-~/.config/bml/*.json
+# Local credentials and environment files
 .env
+.env.*
+!.env.example
+credentials.json
+credentials.*.json
+!credentials.example.json
+!*.example.json
+*.pem
 *.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.mobileprovision
 
-# Test media (large files)
+# Generated media and release artifacts
 *.mkv
 *.mp4
+*.mov
+*.m4v
+*.avi
+*.webm
+*.mka
+*.m4a
 *.aac
-*.ass
-!.gitkeep
+*.flac
+*.wav
+*.torrent
+*.receipt.json
+*.analysis.json
+*.analysis-bundle.json
+*.normalized.ass
+*.reconstructed.ass
+*.ttf
+*.otf
+*.ttc

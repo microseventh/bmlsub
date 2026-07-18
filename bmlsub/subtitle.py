@@ -1,344 +1,252 @@
-"""
-字幕校验、标准化与简繁转换
-"""
+"""Reliable subtitle-conversion stage and compatibility facade."""
 
 from __future__ import annotations
 
-import os
-import re
-import tempfile
+from .version import __version__
+
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Callable
+from urllib.parse import urlsplit, urlunsplit
 
-from ._backup import backup_if_exists
-from .hanvert import HanvertConversionError, _read_ass, convert_ass_with_fanhuaji
-from .config import (
-    SubtitleStandard,
-    SubtitleConversionConfig,
-    SUB_STANDARD_HD,
-    PipelineConfig,
-)
-from .episode import EpisodeFiles
+from .artifacts.validators import validate_ass_conversion
+from .artifacts.writer import ArtifactWriter
+from .execution.stage_runner import StageContext, StageOutcome, StageRunner
+from .hanvert import ASS_RULE_VERSION, ConverterProvider, HanvertResult, convert_ass, read_ass
+from .state.fingerprints import fingerprint_parameters, fingerprint_subtitle, fingerprint_tools
+from .state.models import Diagnostic, DiagnosticLevel, StageInputBinding, StageResult, StageStatus, ValidationStatus
+from .state.sqlite_store import SQLiteJobStore
 
 
-class SubtitleConversionError(Exception):
-    """字幕转换异常"""
-    pass
+SUBTITLE_STAGE_NAME = "subtitle.hanvert"
+OUTPUT_FORMAT_VERSION = "ass-cht-v1"
+FALLBACK_POLICY_VERSION = "explicit-full-file-v1"
+
+
+def _public_api_identity(api_url: str) -> str:
+    parts = urlsplit(api_url)
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+@dataclass(frozen=True)
+class SubtitleConversionOptions:
+    converter: str = "Taiwan"
+    api_url: str = "https://api.zhconvert.org/convert"
+    timeout: int = 60
+    full_file: bool = False
+
+    def parameter_values(self) -> dict[str, object]:
+        return {
+            "converter": self.converter,
+            "api_identity": _public_api_identity(self.api_url),
+            "timeout": self.timeout,
+            "full_file": self.full_file,
+            "fallback_policy": FALLBACK_POLICY_VERSION,
+            "ass_rule_version": ASS_RULE_VERSION,
+            "output_format_version": OUTPUT_FORMAT_VERSION,
+        }
+
+
+def derive_cht_path(chs_path: Path | str) -> Path:
+    source = Path(chs_path)
+    if ".chs&jpn.ass" in source.name:
+        return source.with_name(source.name.replace(".chs&jpn.ass", ".cht&jpn.ass"))
+    if ".chs.ass" in source.name:
+        return source.with_name(source.name.replace(".chs.ass", ".cht.ass"))
+    return source.with_name(f"{source.stem}.cht.ass")
+
+
+def _diagnostics(result: HanvertResult) -> tuple[Diagnostic, ...]:
+    items: list[Diagnostic] = []
+    if result.conversion_mode == "full_file":
+        items.append(Diagnostic(
+            code="full_file_hanvert",
+            message="full-file subtitle conversion was explicitly enabled",
+            level=DiagnosticLevel.WARNING,
+        ))
+    if result.no_op_reason:
+        items.append(Diagnostic(
+            code="subtitle_no_op", message="subtitle conversion made no changes",
+            context={"reason": result.no_op_reason},
+        ))
+    if result.skipped_mixed_groups:
+        items.append(Diagnostic(
+            code="mixed_groups_skipped",
+            message="some mixed-language groups could not be converted reliably",
+            level=DiagnosticLevel.WARNING,
+            context={"count": result.skipped_mixed_groups},
+        ))
+    if result.length_changed_events:
+        items.append(Diagnostic(
+            code="converted_length_changed",
+            message="some converted event text changed length",
+            level=DiagnosticLevel.WARNING,
+            context={"count": result.length_changed_events},
+        ))
+    return tuple(items)
+
+
+def run_subtitle_conversion(
+    chs_path: Path | str,
+    output_path: Path | str | None = None,
+    *,
+    workspace: Path | str | None = None,
+    episode_id: str | None = None,
+    options: SubtitleConversionOptions | None = None,
+    provider: ConverterProvider | None = None,
+    store: SQLiteJobStore | None = None,
+    state_dir: Path | str | None = None,
+    source_artifact_id: str | None = None,
+    artifact_type: str = "subtitle.cht.ass",
+    language: str = "zh-hant",
+    force: bool = False,
+) -> StageResult:
+    source = Path(chs_path).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"Simplified Chinese subtitle does not exist: {source}")
+    target = Path(output_path).expanduser().resolve() if output_path else derive_cht_path(source).resolve()
+    root = Path(workspace).expanduser().resolve() if workspace else source.parent.resolve()
+    try:
+        source.relative_to(root)
+        target.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("subtitle paths must be inside the workspace") from exc
+    settings = options or SubtitleConversionOptions()
+    input_fingerprint = fingerprint_subtitle(source).digest
+    parameter_fingerprint = fingerprint_parameters(settings.parameter_values())
+    tool_fingerprint = fingerprint_tools({
+        "bmlsub": __version__, "hanvert_rules": ASS_RULE_VERSION,
+        "output_format": OUTPUT_FORMAT_VERSION, "provider": settings.converter,
+    })
+    ledger = store or SQLiteJobStore.for_workspace(root, state_dir)
+    ledger.initialize()
+    source_artifact = None
+    inputs: tuple[StageInputBinding, ...] = ()
+    if source_artifact_id is not None:
+        source_artifact = ledger.get_artifact(source_artifact_id)
+        if (source_artifact is None or source_artifact.validation_status is not ValidationStatus.VALID
+                or source_artifact.episode_id != episode_id or source_artifact.path != source):
+            raise ValueError("subtitle source artifact is not current")
+        inputs = (StageInputBinding(source_artifact.artifact_id, "subtitle", 0),)
+    runner = StageRunner(ledger)
+
+    def adapter(context: StageContext) -> StageOutcome:
+        source_content, _ = read_ass(source)
+        converted = convert_ass(
+            source_content,
+            converter=settings.converter,
+            api_url=settings.api_url,
+            timeout=settings.timeout,
+            full_file=settings.full_file,
+            provider=provider,
+        )
+        diagnostics = _diagnostics(converted)
+        if converted.no_op_reason:
+            return StageOutcome(status=StageStatus.SKIPPED, diagnostics=diagnostics)
+        written = ArtifactWriter(
+            target,
+            workspace=root,
+            run_id=context.run_id,
+            stage_id=context.stage_id,
+            artifact_type=artifact_type,
+            episode_id=episode_id,
+            source_fingerprint=context.input_fingerprint,
+            parameter_fingerprint=context.parameter_fingerprint,
+            metadata={
+                "language": language,
+                "source_subtitle_artifact_id": (
+                    source_artifact.artifact_id if source_artifact is not None else None
+                ),
+            },
+        ).write(
+            lambda temporary: temporary.write_text(converted.content, encoding="utf-8"),
+            lambda candidate: validate_ass_conversion(
+                source, candidate, allow_full_file=settings.full_file,
+            ),
+        )
+        backup_diagnostic = ()
+        if written.backup_path is not None:
+            backup_diagnostic = (Diagnostic(
+                code="artifact_backup_created",
+                message="the previous subtitle was backed up before replacement",
+                context={"path": str(written.backup_path)},
+            ),)
+        return StageOutcome(
+            artifacts=(replace(
+                written.artifact,
+                metadata={
+                    key: value for key, value in dict(written.artifact.metadata).items()
+                    if value is not None
+                },
+            ),), diagnostics=diagnostics + backup_diagnostic,
+        )
+
+    return runner.run(
+        workspace=root,
+        command_name="episode.validate",
+        stage_name=SUBTITLE_STAGE_NAME,
+        episode_id=episode_id,
+        input_fingerprint=input_fingerprint,
+        parameter_fingerprint=parameter_fingerprint,
+        tool_fingerprint=tool_fingerprint,
+        adapter=adapter,
+        inputs=inputs,
+        run_metadata={"input_type": "subtitle.chs.ass", "full_file": settings.full_file},
+        force=force,
+    )
 
 
 class SubtitleValidator:
-    """字幕文件校验、标准化与简繁转换"""
+    """Compatibility entry for callers of the legacy subtitle validator."""
 
-    def __init__(self, standard: SubtitleStandard | None = None, config: PipelineConfig | None = None):
-        self.standard = standard or SUB_STANDARD_HD
-        self.config = config or PipelineConfig()
+    def __init__(self, *, workspace: Path | str | None = None,
+                 store: SQLiteJobStore | None = None,
+                 state_dir: Path | str | None = None,
+                 provider: ConverterProvider | None = None) -> None:
+        self.workspace = Path(workspace).resolve() if workspace else None
+        self.store = store
+        self.state_dir = state_dir
+        self.provider = provider
+        self.last_result: StageResult | None = None
 
-    @property
-    def conversion_config(self) -> SubtitleConversionConfig:
-        return self.config.subtitle_conversion
-
-    def check_subtitle_exists(self, episode_dir: Path | str,
-                              episode_id: str,
-                              sub_type: str,
-                              chs_subtitle: Path | str | None = None,
-                              cht_subtitle: Path | str | None = None) -> Path | None:
-        ctx = EpisodeFiles.discover(
-            episode_dir,
-            episode_id,
-            config=self.config,
-            chs_subtitle=chs_subtitle,
-            cht_subtitle=cht_subtitle,
-        )
-        return ctx.subtitle_for(sub_type)
-
-    def validate_for_episode(self, episode_dir: Path | str,
-                             episode_id: str,
-                             chs_subtitle: Path | str | None = None,
-                             cht_subtitle: Path | str | None = None) -> dict:
-        ctx = EpisodeFiles.discover(
-            episode_dir,
-            episode_id,
-            config=self.config,
-            chs_subtitle=chs_subtitle,
-            cht_subtitle=cht_subtitle,
-        )
-        result = {"chs": {}, "cht": {}, "all_ok": True, "all_subs": [p.name for p in ctx.all_subs]}
-        for sub_type in ("chs", "cht"):
-            sub_path = ctx.subtitle_for(sub_type)
-            info = {"exists": sub_path is not None, "path": sub_path, "header_ok": True, "issues": []}
-            if sub_path:
-                header_issues = self.validate_ass_header(sub_path)
-                if header_issues:
-                    info["header_ok"] = False
-                    info["issues"] = list(header_issues.keys())
-                    result["all_ok"] = False
-            else:
-                result["all_ok"] = False
-            result[sub_type] = info
-        return result
-
-    def validate_ass_header(self, ass_path: Path) -> dict[str, str]:
-        header = self._parse_ass_header(ass_path)
-        expected = self.standard.expected_header
-        violations: dict[str, str] = {}
-        for key, expected_val in expected.items():
-            actual = header.get(key)
-            if actual != expected_val:
-                violations[key] = actual or "(缺失)"
-        return violations
-
-    def standardize_ass(self, ass_path: Path,
-                        output_path: Path | None = None) -> Path:
-        ass_path = Path(ass_path)
-        content = ass_path.read_text(encoding="utf-8")
-        if output_path is None:
-            output_path = ass_path
-            bak = backup_if_exists(ass_path)
-            if bak:
-                print(f"📦 已备份旧字幕 → {bak.name}")
-        else:
-            out = Path(output_path)
-            if out.exists():
-                bak = backup_if_exists(out)
-                if bak:
-                    print(f"📦 已备份旧字幕 → {bak.name}")
-
-        expected = self.standard.expected_header
-        for key, value in expected.items():
-            pattern = rf"^{re.escape(key)}:\s*.*$"
-            replacement = f"{key}: {value}"
-            if re.search(pattern, content, flags=re.MULTILINE):
-                content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
-            else:
-                insert_pos = content.find("[V4")
-                if insert_pos == -1:
-                    insert_pos = content.find("[Events]")
-                if insert_pos == -1:
-                    content = content.rstrip() + f"\n{replacement}\n"
-                else:
-                    content = content[:insert_pos].rstrip() + f"\n{replacement}\n\n" + content[insert_pos:]
-
-        output_path = Path(output_path)
-        output_path.write_text(content, encoding="utf-8")
-        print(f"📝 ASS 头部已标准化: {output_path.name}")
-        return output_path
-
-    def standardize_extracted_subs(self, episode_dir: Path, episode_id: str,
-                                   source_video: Path | str | None = None,
-                                   chs_subtitle: Path | str | None = None,
-                                   cht_subtitle: Path | str | None = None) -> list[Path]:
-        ctx = EpisodeFiles.discover(
-            episode_dir,
-            episode_id,
-            config=self.config,
-            source_video=source_video,
-            chs_subtitle=chs_subtitle,
-            cht_subtitle=cht_subtitle,
-        )
-        results: list[Path] = []
-        for sub in ctx.extracted_subtitles:
-            violations = self.validate_ass_header(sub)
-            if violations:
-                results.append(self.standardize_ass(sub))
-            else:
-                print(f"  ✅ 已合规: {sub.name}")
-        return results
-
-    def convert_chs_to_cht(self,
-                           chs_path: Path | str,
-                           output_path: Path | str | None = None,
-                           *,
-                           converter: str | None = None,
-                           api_url: str | None = None,
-                           timeout: int | None = None,
-                           backup_existing: bool = True,
-                           full_file: bool = False,
-                           fallback_to_full_file: bool = True) -> Path:
-        chs_path = Path(chs_path)
-        if not chs_path.exists():
-            raise FileNotFoundError(f"简体字幕不存在: {chs_path}")
-
-        output = Path(output_path) if output_path else self.derive_cht_path(chs_path)
-        cfg = self.conversion_config
-        api = api_url or cfg.api_url
-        mode = converter or cfg.converter
-        req_timeout = timeout if timeout is not None else cfg.timeout
-
-        print(f"🔄 繁化姬转换: {chs_path.name} -> {output.name} ({mode})")
-        chs_content, _ = _read_ass(chs_path)
-
-        try:
-            converted_content, stats = convert_ass_with_fanhuaji(
-                chs_content,
-                converter=mode,
-                api_url=api,
-                timeout=req_timeout,
+    def convert_chs_to_cht(
+        self,
+        chs_path: Path | str,
+        output_path: Path | str | None = None,
+        *,
+        converter: str | None = None,
+        api_url: str | None = None,
+        timeout: int | None = None,
+        backup_existing: bool = True,
+        full_file: bool = False,
+        fallback_to_full_file: bool = False,
+        force: bool = False,
+        episode_id: str | None = None,
+    ) -> Path:
+        del backup_existing, fallback_to_full_file
+        source = Path(chs_path).expanduser().resolve()
+        target = Path(output_path).expanduser().resolve() if output_path else derive_cht_path(source).resolve()
+        result = run_subtitle_conversion(
+            source, target,
+            workspace=self.workspace or source.parent,
+            episode_id=episode_id,
+            options=SubtitleConversionOptions(
+                converter=converter or "Taiwan",
+                api_url=api_url or "https://api.zhconvert.org/convert",
+                timeout=timeout if timeout is not None else 60,
                 full_file=full_file,
-                fallback_to_full_file=fallback_to_full_file,
-            )
-        except HanvertConversionError as exc:
-            raise SubtitleConversionError(str(exc)) from exc
-
-        output.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=output.parent,
-                prefix=f".{output.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as temporary:
-                temporary.write(converted_content)
-                temporary.flush()
-                os.fsync(temporary.fileno())
-                temporary_path = Path(temporary.name)
-            if backup_existing and output.exists():
-                bak = backup_if_exists(output)
-                if bak:
-                    print(f"📦 已备份旧繁体字幕 → {bak.name}")
-            temporary_path.replace(output)
-            temporary_path = None
-        finally:
-            if temporary_path is not None and temporary_path.exists():
-                temporary_path.unlink()
-
-        mode_label = "全文件" if stats["conversion_mode"] == "full_file" else "ASS 感知"
-        print(f"✅ 繁体字幕已生成: {output.name} ({mode_label}模式)")
-        if stats["fallback_reason"] and stats["fallback_reason"] != "requested":
-            print(f"⚠️  ASS 感知无法可靠转换，已自动改用全文件繁化: {stats['fallback_reason']}")
-        if stats["length_changed_events"]:
-            print(f"⚠️  {stats['length_changed_events']} 条繁化结果长度发生变化，请抽查标签位置")
-        if stats["skipped_mixed_groups"]:
-            print(f"⚠️  跳过 {stats['skipped_mixed_groups']} 个无法可靠拆分的中日混合文本段")
-        return output
-
-    def ensure_episode_subtitles(self,
-                                 episode_dir: Path | str,
-                                 episode_id: str,
-                                 source_video: Path | str | None = None,
-                                 chs_subtitle: Path | str | None = None,
-                                 cht_subtitle: Path | str | None = None,
-                                 converter: str | None = None,
-                                 api_url: str | None = None,
-                                 timeout: int | None = None,
-                                 regenerate_cht: bool | None = None,
-                                 full_file: bool = False,
-                                 fallback_to_full_file: bool = True,
-                                 standardize: bool = True) -> dict:
-        ctx = EpisodeFiles.discover(
-            episode_dir,
-            episode_id,
-            config=self.config,
-            source_video=source_video,
-            chs_subtitle=chs_subtitle,
-            cht_subtitle=cht_subtitle,
+            ),
+            provider=self.provider,
+            store=self.store,
+            state_dir=self.state_dir,
+            force=force,
         )
-        cfg = self.conversion_config
-        regenerate = cfg.regenerate_existing_cht if regenerate_cht is None else regenerate_cht
-        chs_file = ctx.subtitle_for("chs") or ctx.subtitle_for("chi")
-        cht_file = ctx.subtitle_for("cht")
-
-        result = {
-            "chs": chs_file,
-            "cht": cht_file,
-            "generated_cht": None,
-            "backed_up": [],
-            "validated": [],
-            "standardized": [],
-            "missing": [],
-            "all_ok": True,
-        }
-
-        print(f"找到字幕文件: 简体={chs_file.name if chs_file else '❌ 未找到'} / 繁体={cht_file.name if cht_file else '❌ 未找到'}")
-
-        if chs_file and cht_file and regenerate:
-            print("📌 已同时找到简繁字幕：先生成并验证新繁体，成功后再备份旧文件")
-            cht_file = self.convert_chs_to_cht(
-                chs_file,
-                output_path=cht_file,
-                converter=converter,
-                api_url=api_url,
-                timeout=timeout,
-                full_file=full_file,
-                fallback_to_full_file=fallback_to_full_file,
-            )
-            result["generated_cht"] = cht_file
-        elif chs_file and not cht_file:
-            print("📌 仅找到简体字幕：将使用繁化姬生成繁体字幕")
-            cht_file = self.convert_chs_to_cht(
-                chs_file,
-                output_path=self.derive_cht_path(chs_file),
-                converter=converter,
-                api_url=api_url,
-                timeout=timeout,
-                full_file=full_file,
-                fallback_to_full_file=fallback_to_full_file,
-            )
-            result["generated_cht"] = cht_file
-        elif cht_file and not chs_file:
-            print("⚠️ 仅找到繁体字幕，缺少简体基准文件；跳过繁化姬转换，仅校验现有繁体字幕")
-        else:
-            result["all_ok"] = False
-            result["missing"] = [f"{episode_id}.chs&jpn.ass", f"{episode_id}.cht&jpn.ass"]
-            print("⚠️ 未找到制作组字幕文件，跳过处理")
-            return result
-
-        result["cht"] = cht_file
-        active_files = [path for path in (chs_file, cht_file) if path and path.exists()]
-        for sub_path in active_files:
-            result["validated"].append(sub_path)
-            violations = self.validate_ass_header(sub_path)
-            if violations and standardize:
-                print(f"📝 {sub_path.name}: 修正 {list(violations.keys())}")
-                self.standardize_ass(sub_path)
-                result["standardized"].append(sub_path)
-            elif violations:
-                result["all_ok"] = False
-                print(f"⚠️ {sub_path.name}: 发现头部问题 {list(violations.keys())}")
-            else:
-                print(f"✅ {sub_path.name}: 已合规")
-
-        if chs_file is None:
-            result["all_ok"] = False
-            result["missing"].append(f"{episode_id}.chs&jpn.ass")
-        if cht_file is None:
-            result["all_ok"] = False
-            result["missing"].append(f"{episode_id}.cht&jpn.ass")
-        return result
-
-    def derive_cht_path(self, chs_path: Path | str) -> Path:
-        chs_path = Path(chs_path)
-        name = chs_path.name
-        if ".chs&jpn.ass" in name:
-            return chs_path.with_name(name.replace(".chs&jpn.ass", ".cht&jpn.ass"))
-        if ".chs.ass" in name:
-            return chs_path.with_name(name.replace(".chs.ass", ".cht.ass"))
-        return chs_path.with_name(f"{chs_path.stem}.cht.ass")
-
-    def move_to_backup(self, path: Path | str, backup_dir: Path | str | None = None) -> Path:
-        src = Path(path)
-        target_dir = Path(backup_dir) if backup_dir else src.parent / self.conversion_config.backup_dir_name
-        target_dir.mkdir(exist_ok=True)
-        target = target_dir / src.name
-        if target.exists():
-            bak = backup_if_exists(target)
-            if bak:
-                target = target_dir / src.name
-        src.rename(target)
-        print(f"📦 已移入备份目录: {src.name} -> {target_dir.name}/{target.name}")
-        return target
-
-    def _parse_ass_header(self, ass_path: Path) -> dict[str, str]:
-        header: dict[str, str] = {}
-        content = ass_path.read_text(encoding="utf-8")
-        match = re.search(r"\[Script Info\](.*?)\n\[", content, re.DOTALL)
-        if not match:
-            return header
-        section = match.group(1)
-        for line in section.splitlines():
-            line = line.strip()
-            if ":" in line and not line.startswith(";"):
-                key, _, val = line.partition(":")
-                header[key.strip()] = val.strip()
-        return header
+        self.last_result = result
+        if result.status in {StageStatus.SUCCEEDED, StageStatus.SKIPPED}:
+            return target
+        if result.needs_review:
+            raise RuntimeError("subtitle conversion requires review")
+        raise RuntimeError(result.error["message"] if result.error else "subtitle conversion failed")
