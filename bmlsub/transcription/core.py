@@ -9,7 +9,6 @@ from enum import Enum
 import importlib.metadata
 import json
 from pathlib import Path
-import tempfile
 import time
 from typing import Any, Mapping, Protocol
 import wave
@@ -156,6 +155,13 @@ def run_transcription(*, workspace: Path | str, episode_id: str,
              if config.mode is TranscriptionMode.BOTH else (config.mode,))
     directory = _output_directory(root, episode_id, output_dir)
     targets = tuple(_output_path(directory, episode_id, mode, config.model) for mode in modes)
+    chunk_plan = (_chunk_plan(duration_seconds, config)
+                  if TranscriptionMode.CHUNKED in modes else ())
+    chunk_directory = _chunk_output_directory(root, config.model)
+    chunk_targets = tuple(
+        chunk_directory / f"chunk-{index:04d}-{_format_seconds(start)}-{_format_seconds(end)}.wav"
+        for index, (start, end) in enumerate(chunk_plan)
+    )
     process = runner or ProcessRunner(timeout=process_timeout)
     ffmpeg_version = process.version(ffmpeg) if TranscriptionMode.CHUNKED in modes else "unused"
     input_fp = hash_json({
@@ -177,6 +183,7 @@ def run_transcription(*, workspace: Path | str, episode_id: str,
         "throttle_seconds": config.throttle_seconds,
         "decoding": dict(config.decoding),
         "targets": [str(path.relative_to(root)) for path in targets],
+        "chunk_targets": [str(path.relative_to(root)) for path in chunk_targets],
         "schema_version": TRANSCRIPTION_SCHEMA_VERSION,
         "profile_version": TRANSCRIPTION_PROFILE_VERSION,
         "naming_version": TRANSCRIPTION_NAMING_VERSION,
@@ -213,6 +220,19 @@ def run_transcription(*, workspace: Path | str, episode_id: str,
                     "validator_version": TRANSCRIPTION_VALIDATOR_VERSION,
                 },
             ))
+        for index, (target, (start, end)) in enumerate(zip(chunk_targets, chunk_plan)):
+            specs.append(ArtifactWriteSpec(
+                target=target, artifact_type="generated.audio.transcription_chunk",
+                validator=_validate_chunk_audio,
+                metadata={
+                    "source_audio_artifact_id": audio.artifact_id,
+                    "mode": "chunked", "model": config.model, "chunk_index": index,
+                    "start": start, "end": end, "chunk_seconds": config.chunk_seconds,
+                    "overlap_seconds": config.overlap_seconds,
+                    "chunk_plan_version": CHUNK_PLAN_VERSION,
+                    "channels": 1, "sample_rate": 16000, "codec": "pcm_s16le",
+                },
+            ))
         writer = ArtifactBatchWriter(
             workspace=root, run_id=context.run_id, stage_id=context.stage_id,
             episode_id=episode_id, source_fingerprint=input_fp,
@@ -220,14 +240,16 @@ def run_transcription(*, workspace: Path | str, episode_id: str,
         )
 
         def produce(paths: tuple[Path, ...]) -> None:
-            for mode, candidate in zip(modes, paths):
+            transcript_paths = paths[:len(modes)]
+            persisted_chunks = paths[len(modes):]
+            for mode, candidate in zip(modes, transcript_paths):
                 payload = (_transcribe_direct(audio.path, whisper, config, resolved_model)
                            if mode is TranscriptionMode.DIRECT else
                            _transcribe_chunked(
-                               audio.path, duration_seconds, whisper, config,
-                               model_path=resolved_model,
+                               audio.path, whisper, config, model_path=resolved_model,
                                process=process, ffmpeg=ffmpeg,
-                               process_timeout=process_timeout, workspace=root,
+                               process_timeout=process_timeout,
+                               chunks=chunk_plan, chunk_paths=persisted_chunks,
                            ))
                 candidate.write_text(
                     json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
@@ -246,6 +268,14 @@ def run_transcription(*, workspace: Path | str, episode_id: str,
                 diagnostics.append(Diagnostic(
                     code="artifact_backup_created",
                     message="existing transcript output was backed up",
+                    context={"path": str(result.backup_path)},
+                ))
+        for result in results[len(modes):]:
+            artifacts.append(result.artifact)
+            if result.backup_path:
+                diagnostics.append(Diagnostic(
+                    code="artifact_backup_created",
+                    message="existing transcription chunk was backed up",
                     context={"path": str(result.backup_path)},
                 ))
         diagnostics.append(Diagnostic(
@@ -306,35 +336,33 @@ def _transcribe_direct(audio_path: Path, backend: WhisperBackend,
     return _transcript_payload(options, TranscriptionMode.DIRECT, segments)
 
 
-def _transcribe_chunked(audio_path: Path, duration_seconds: float,
-                        backend: WhisperBackend, options: TranscriptionOptions, *,
-                        model_path: str, process: ProcessRunner, ffmpeg: Path | str,
-                        process_timeout: float, workspace: Path) -> dict[str, Any]:
-    chunks = _chunk_plan(duration_seconds, options)
+def _transcribe_chunked(audio_path: Path, backend: WhisperBackend,
+                        options: TranscriptionOptions, *, model_path: str,
+                        process: ProcessRunner, ffmpeg: Path | str,
+                        process_timeout: float,
+                        chunks: tuple[tuple[float, float], ...],
+                        chunk_paths: tuple[Path, ...]) -> dict[str, Any]:
     segments: list[dict[str, Any]] = []
-    temporary_root = workspace / ".bmlsub" / "tmp"
-    temporary_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="transcribe-", dir=temporary_root) as directory:
-        root = Path(directory)
-        for index, (start, end) in enumerate(chunks):
-            chunk_path = root / f"chunk-{index:04d}.wav"
-            process.run([
-                str(ffmpeg), "-nostdin", "-y", "-v", "error",
-                "-ss", _format_seconds(start), "-t", _format_seconds(end - start),
-                "-i", str(audio_path), "-vn", "-sn", "-dn",
-                "-c:a", "pcm_s16le", "-ac", "1", "-ar", "16000",
-                "-f", "wav", str(chunk_path),
-            ], timeout=process_timeout)
-            result = backend.transcribe(
-                chunk_path, model=model_path, language=options.language,
-                decoding=options.decoding,
-            )
-            segments.extend(_normalize_segments(
-                result.get("segments", ()), offset=start, chunk_index=index,
-                clip_start=start, clip_end=end,
-            ))
-            if options.throttle_seconds and index + 1 < len(chunks):
-                time.sleep(options.throttle_seconds)
+    if len(chunks) != len(chunk_paths):
+        raise ValueError("chunk plan and output paths do not match")
+    for index, ((start, end), chunk_path) in enumerate(zip(chunks, chunk_paths)):
+        process.run([
+            str(ffmpeg), "-nostdin", "-y", "-v", "error",
+            "-ss", _format_seconds(start), "-t", _format_seconds(end - start),
+            "-i", str(audio_path), "-vn", "-sn", "-dn",
+            "-c:a", "pcm_s16le", "-ac", "1", "-ar", "16000",
+            "-f", "wav", str(chunk_path),
+        ], timeout=process_timeout)
+        result = backend.transcribe(
+            chunk_path, model=model_path, language=options.language,
+            decoding=options.decoding,
+        )
+        segments.extend(_normalize_segments(
+            result.get("segments", ()), offset=start, chunk_index=index,
+            clip_start=start, clip_end=end,
+        ))
+        if options.throttle_seconds and index + 1 < len(chunks):
+            time.sleep(options.throttle_seconds)
     segments.sort(key=lambda item: (item["start"], item["end"], item.get("chunk_index", 0)))
     return _transcript_payload(options, TranscriptionMode.CHUNKED, segments)
 
@@ -482,6 +510,23 @@ def _output_path(directory: Path, episode_id: str, mode: TranscriptionMode,
     model_name = model.rstrip("/").split("/")[-1]
     safe_model = "".join(char if char.isalnum() or char in "._-" else "-" for char in model_name)
     return directory / f"{episode_id}.{mode.value}.{safe_model}.transcript.json"
+
+
+def _chunk_output_directory(workspace: Path, model: str) -> Path:
+    model_name = model.rstrip("/").split("/")[-1]
+    safe_model = "".join(char if char.isalnum() or char in "._-" else "-" for char in model_name)
+    return workspace / "workstation" / "preprocess" / "audio" / "chunks" / f"chunked-{safe_model}"
+
+
+def _validate_chunk_audio(path: Path) -> None:
+    try:
+        with wave.open(str(path), "rb") as handle:
+            if handle.getnchannels() != 1 or handle.getframerate() != 16000 or handle.getsampwidth() != 2:
+                raise ValueError("chunk WAV must be mono 16 kHz signed 16-bit PCM")
+            if handle.getnframes() <= 0:
+                raise ValueError("chunk WAV is empty")
+    except (OSError, wave.Error) as exc:
+        raise ValueError("chunk WAV is unreadable") from exc
 
 
 def _format_seconds(value: float) -> str:

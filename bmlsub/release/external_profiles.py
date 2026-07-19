@@ -127,6 +127,7 @@ class QBittorrentSeedProfile:
     host: str = "127.0.0.1"
     port: int = 8080
     save_path: str = "/downloads"
+    legacy_host_save_path: str | None = None
     webui_origin: str | None = None
     category: str = ""
     tags: tuple[str, ...] = ()
@@ -144,6 +145,12 @@ class QBittorrentSeedProfile:
         path = PurePosixPath(self.save_path)
         if not path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts[1:]):
             raise ValueError("save_path must be a normalized absolute POSIX path")
+        if self.legacy_host_save_path is not None:
+            legacy = PurePosixPath(self.legacy_host_save_path)
+            if (not legacy.is_absolute()
+                    or any(part in {"", ".", ".."} for part in legacy.parts[1:])):
+                raise ValueError("legacy_host_save_path must be a normalized absolute POSIX path")
+            object.__setattr__(self, "legacy_host_save_path", str(legacy))
         if self.webui_origin is not None:
             parsed = urlparse(self.webui_origin)
             if (parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password
@@ -162,6 +169,7 @@ class QBittorrentSeedProfile:
         return {
             "version": QB_SEED_PROFILE_VERSION, "ssh_alias": self.ssh_alias,
             "host": self.host, "port": self.port, "save_path": self.save_path,
+            "legacy_host_save_path": self.legacy_host_save_path,
             "webui_origin": self.webui_origin,
             "category": self.category, "tags": list(self.tags),
             "poll_interval": self.poll_interval, "poll_timeout": self.poll_timeout,
@@ -171,7 +179,8 @@ class QBittorrentSeedProfile:
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "QBittorrentSeedProfile":
         data = _mapping(value, {
-            "ssh_alias", "host", "port", "save_path", "webui_origin", "category", "tags",
+            "ssh_alias", "host", "port", "save_path", "legacy_host_save_path",
+            "webui_origin", "category", "tags",
             "poll_interval", "poll_timeout", "allow_magnet_fallback",
         }, "qBittorrent seed profile")
         if "tags" in data:

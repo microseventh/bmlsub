@@ -2,6 +2,49 @@
 
 [中文](zh/getting-started.md) · [Documentation home](../README.md)
 
+## Workstation fast mode
+
+From a series root, ordinary users only need three entry points:
+
+```bash
+# Interactive Workstation fast mode
+bmlsub workstation start
+
+# Interactive external delivery
+bmlsub workstation start delivery
+
+# Unattended external delivery
+bmlsub workstation start delivery -y
+```
+
+### Interactive Workstation fast mode
+
+`bmlsub workstation start` uses the current directory as the series root and interactively selects an episode. It detects the current phase, offers quick/full/no-transcription choices during preprocess, preserves the human translation handoff, and offers full/MKV-only/MP4-only/custom local production when appropriate. Ordinary users do not need to compose `--series-root`, `--episode-id`, `--execute`, `--transcription`, or delivery-selection flags; those remain advanced CLI automation options.
+
+### Interactive external delivery
+
+After local products and Torrents are complete, run:
+
+```bash
+bmlsub workstation start delivery
+```
+
+The command selects an episode, validates the Credential Manifest, macOS Keychain profiles, SSH alias, host/container paths, and local inputs, then prints one concise summary. It confirms each product action in service order: all R2 uploads, all VPS pulls, all qB seeds, then all Anibt publications. Use `--configure` to create, replace, or repair credentials and `--verbose-plan` to display every file mapping.
+
+### Unattended external delivery
+
+When the Manifest, Keychain profiles, SSH, and public configuration are already valid, run:
+
+```bash
+bmlsub workstation start delivery -y
+```
+
+`-y/--yes` skips external-delivery confirmations but retains all validation. It re-evaluates the delivery chain and reuses valid Stage fingerprints and receipts, so it is not equivalent to `--force` and does not unconditionally repeat uploads or publications. Missing or invalid credentials return `needs_review`; unattended mode never requests plaintext secrets.
+
+When a terminal is still interactive, the command may still ask the user to select an episode. Fully noninteractive automation over a series with multiple episode directories must identify the episode through the advanced CLI interface; ordinary interactive fast mode does not require users to supply those parameters.
+
+On a later run, the default behavior re-evaluates the complete chain and safely reuses valid results. `--resume` communicates continuation from existing valid state, while `--restart` communicates evaluation from the first delivery stage. Neither mode automatically deletes R2 objects, VPS files, qB data, or Anibt releases.
+
 `bmlsub` targets macOS on Apple Silicon with Python 3.10 or newer. The recommended environment is Conda base.
 
 ## 1. Activate Python
@@ -93,7 +136,7 @@ command -v ffmpeg ffprobe mkvmerge ssh
 Expected package version:
 
 ```text
-bmlsub 1.0.0
+bmlsub 1.1.1
 ```
 
 If `ffmpeg` or `ffprobe` resolves unexpectedly, confirm the linked tap formula with `brew info homebrew-ffmpeg/ffmpeg/ffmpeg` and inspect `brew --prefix` and `PATH`.

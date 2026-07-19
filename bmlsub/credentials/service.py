@@ -82,6 +82,40 @@ class CredentialService:
     def _manifest(self) -> CredentialManifest:
         return load_credential_manifest(self.manifest_path)
 
+    def initialize_manifest(self, *, namespace: str = "main") -> dict[str, Any]:
+        """Create an empty non-secret manifest without replacing an existing one."""
+        if self.manifest_path.exists():
+            manifest = self._manifest()
+            return {
+                "status": "skipped", "reused": True,
+                "manifest": str(self.manifest_path),
+                "namespace": manifest.namespace,
+                "keychain_service": manifest.keychain_service(),
+            }
+        manifest = CredentialManifest(namespace=namespace, profiles={})
+        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.manifest_path.with_name(f".{self.manifest_path.name}.lock")
+        with lock_path.open("a+") as handle:
+            lock_path.chmod(0o600)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                if self.manifest_path.exists():
+                    current = self._manifest()
+                    return {
+                        "status": "skipped", "reused": True,
+                        "manifest": str(self.manifest_path),
+                        "namespace": current.namespace,
+                        "keychain_service": current.keychain_service(),
+                    }
+                _atomic_write_manifest(self.manifest_path, manifest)
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return {
+            "status": "succeeded", "reused": False,
+            "manifest": str(self.manifest_path), "namespace": namespace,
+            "keychain_service": manifest.keychain_service(),
+        }
+
     def list_profiles(self) -> dict[str, Any]:
         manifest = self._manifest()
         return {

@@ -7,17 +7,122 @@ from typing import Any
 
 from ..artifacts import ArtifactWriter
 from ..execution.stage_runner import StageContext, StageOutcome, StageRunner
+from ..production.models import ProductionOperation
+from ..production.profiles import (
+    H264_CHS_PROFILE, HEVC_10BIT_PROFILE, normalize_profile,
+)
+from ..release.profiles import normalize_torrent_profile
 from ..state.fingerprints import fingerprint_file, fingerprint_parameters, fingerprint_tools, hash_json
 from ..state.models import Diagnostic, StageInputBinding
 from ..subtitle import SubtitleConversionOptions, run_subtitle_conversion
 from .common import discover_production_subtitle, discover_source_video, ensure_directories, open_workstation, top_level_fonts
-from .models import DeliveryConfig, WorkstationConfig
+from .models import DeliveryConfig, DeliverySelection, WorkstationConfig
 from .series import discover_series_context
 from .naming import ProductKind
 from .state import atomic_write_json, load_manifest, pipeline_payload_step, refresh_summary, result_step, step_payload, update_manifest, write_step
 
 
 COPY_TOOL_VERSION = "workstation-copy-v1"
+_PRODUCT_MANIFEST_FIELDS = {
+    ProductKind.MP4_CHS.value: "hardsub_chs_artifact_id",
+    ProductKind.MP4_CHT.value: "hardsub_cht_artifact_id",
+    ProductKind.MKV_HEVC.value: "muxed_mkv_artifact_id",
+}
+
+
+def plan_delivery_execution(
+    episode_dir: Path | str, *, episode_id: str | None = None,
+    production_subtitle: Path | str | None = None, release_names=None,
+    selection: DeliverySelection | None = None,
+    hardsub_parameters: dict[str, Any] | None = None,
+    hevc_parameters: dict[str, Any] | None = None,
+    ass_profile: dict[str, Any] | None = None,
+    torrent_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a read-only, user-facing local-production execution plan."""
+    root = Path(episode_dir).expanduser().resolve()
+    context = discover_series_context(root)
+    identifier = episode_id or context.episode_id
+    if identifier != context.episode_id:
+        raise ValueError("episode_id does not match numeric episode directory")
+    base = WorkstationConfig.from_series_context(context)
+    inherited = base.delivery
+    selected = selection or DeliverySelection.for_scope("full")
+    names = release_names or inherited.names
+    config = WorkstationConfig.from_series_context(
+        context,
+        delivery=DeliveryConfig(
+            names=names, production_subtitle=production_subtitle,
+            hardsub_parameters=(hardsub_parameters if hardsub_parameters is not None else inherited.hardsub_parameters),
+            hevc_parameters=(hevc_parameters if hevc_parameters is not None else inherited.hevc_parameters),
+            ass_profile=(ass_profile if ass_profile is not None else inherited.ass_profile),
+            torrent_profile=(torrent_profile if torrent_profile is not None else inherited.torrent_profile),
+        ),
+    )
+    inputs = plan_delivery(
+        root, episode_id=identifier, production_subtitle=production_subtitle,
+        release_names=names,
+    )
+    manifest = load_manifest(root)
+    products = config.product_paths()
+    product_paths = {key: str(products[key]) for key in selected.products}
+    torrent_paths = ({key: str(config.torrent_paths()[key]) for key in selected.products}
+                     if selected.create_torrents else {})
+    registered_products = manifest.get("products", {})
+    registered_torrents = manifest.get("torrents", {})
+    completed_products = [
+        key for key in selected.products
+        if registered_products.get(_PRODUCT_MANIFEST_FIELDS[key])
+    ]
+    completed_torrents = [key for key in selected.products if registered_torrents.get(key)]
+    return {
+        "schema_version": "workstation-delivery-plan-v1",
+        "workflow_id": config.workflow_id,
+        "phase": "delivery",
+        "status": inputs["status"],
+        "episode_dir": str(root),
+        "episode_id": identifier,
+        "source_video": inputs["source_video"],
+        "production_subtitle": inputs["production_subtitle"],
+        "fonts": inputs["fonts"],
+        "font_count": len(inputs["fonts"]),
+        "release_names": names.to_dict(),
+        "profiles": {
+            "hevc": normalize_profile(
+                ProductionOperation.ENCODE, HEVC_10BIT_PROFILE,
+                config.delivery.hevc_parameters,
+            ).normalized(),
+            "hardsub": normalize_profile(
+                ProductionOperation.HARDSUB, H264_CHS_PROFILE,
+                config.delivery.hardsub_parameters,
+            ).normalized(),
+            "ass": dict(config.delivery.ass_profile),
+            "torrent": normalize_torrent_profile(
+                config.delivery.torrent_profile,
+            ).normalized(),
+        },
+        "selection": selected.to_dict(),
+        "steps": list(selected.steps),
+        "targets": {
+            "hevc_intermediate": str(config.intermediate_path())
+            if ProductKind.MKV_HEVC.value in selected.products else None,
+            "products": product_paths,
+            "torrents": torrent_paths,
+        },
+        "registered": {
+            "products": completed_products,
+            "torrents": completed_torrents,
+        },
+        "remaining": {
+            "products": [key for key in selected.products if key not in completed_products],
+            "torrents": ([key for key in selected.products if key not in completed_torrents]
+                         if selected.create_torrents else []),
+        },
+        "errors": inputs["errors"],
+        "next_action": ("confirm_delivery_plan" if inputs["status"] == "succeeded"
+                        else "resolve_delivery_inputs"),
+        "external_publish_allowed": False,
+    }
 
 
 def plan_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
@@ -161,6 +266,7 @@ def _copy_stage(*, workstation, source_artifact_id: str, target: Path,
 
 def run_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
                  production_subtitle: Path | str | None = None, release_names=None,
+                 selection: DeliverySelection | None = None,
                  hardsub_parameters: dict[str, Any] | None = None,
                  hevc_parameters: dict[str, Any] | None = None,
                  ass_profile: dict[str, Any] | None = None,
@@ -173,6 +279,7 @@ def run_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
     if identifier != context.episode_id:
         raise ValueError("episode_id does not match numeric episode directory")
     release_names = release_names or WorkstationConfig.from_series_context(context).delivery.names
+    selection = selection or DeliverySelection.for_scope("full")
     validated = validate_translation_delivery(
         root, episode_id=identifier, production_subtitle=production_subtitle,
         release_names=release_names, force=force,
@@ -284,11 +391,24 @@ def run_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
     requests = {}
     executions = {}
     products = config.product_paths()
-    request_specs = (
-        ("hevc", "encode", source_video_id, (), "hevc-10bit", config.intermediate_path(), config.delivery.hevc_parameters),
-        ("hardsub_chs", "hardsub", source_video_id, (chs_snapshot_id,), "h264-chs", products[ProductKind.MP4_CHS.value], config.delivery.hardsub_parameters),
-        ("hardsub_cht", "hardsub", source_video_id, (cht_id,), "h264-cht", products[ProductKind.MP4_CHT.value], config.delivery.hardsub_parameters),
-    )
+    request_specs = []
+    if ProductKind.MKV_HEVC.value in selection.products:
+        request_specs.append(
+            ("hevc", "encode", source_video_id, (), "hevc-10bit",
+             config.intermediate_path(), config.delivery.hevc_parameters)
+        )
+    if ProductKind.MP4_CHS.value in selection.products:
+        request_specs.append(
+            ("hardsub_chs", "hardsub", source_video_id, (chs_snapshot_id,),
+             "h264-chs", products[ProductKind.MP4_CHS.value],
+             config.delivery.hardsub_parameters)
+        )
+    if ProductKind.MP4_CHT.value in selection.products:
+        request_specs.append(
+            ("hardsub_cht", "hardsub", source_video_id, (cht_id,),
+             "h264-cht", products[ProductKind.MP4_CHT.value],
+             config.delivery.hardsub_parameters)
+        )
     for key, operation, video_id, subtitle_ids, profile, target, parameters in request_specs:
         created = workstation.pipeline.create_production_request(
             workspace=root, episode_id=identifier, operation=operation,
@@ -308,44 +428,78 @@ def run_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
         if executions[key]["status"] not in {"succeeded", "skipped"}:
             refresh_summary(root)
             return executions[key]
-    hevc_id = executions["hevc"]["artifacts"][0]["artifact_id"]
-    mux = workstation.pipeline.create_production_request(
-        workspace=root, episode_id=identifier, operation="mux_subtitle",
-        video_artifact_id=hevc_id, subtitle_artifact_ids=(chs_snapshot_id, cht_id),
-        font_artifact_ids=font_ids, output_profile="mkv-subtitle",
-        output_target=products[ProductKind.MKV_HEVC.value],
-        parameters={"default_subtitle_ordinal": 0},
-    )
-    mux_result = workstation.pipeline.execute_production_request(
-        mux["request"]["request_id"], workspace=root, force=force
-    )
-    pipeline_payload_step(root, workflow_id=config.workflow_id, phase="delivery",
-                          step="delivery.mux_subtitles", payload=mux_result)
-    product_ids = {
-        ProductKind.MP4_CHS.value: executions["hardsub_chs"]["artifacts"][0]["artifact_id"],
-        ProductKind.MP4_CHT.value: executions["hardsub_cht"]["artifacts"][0]["artifact_id"],
-        ProductKind.MKV_HEVC.value: mux_result["artifacts"][0]["artifact_id"],
-    }
-    update_manifest(root, products={
-        "hardsub_chs_artifact_id": product_ids[ProductKind.MP4_CHS.value],
-        "hardsub_cht_artifact_id": product_ids[ProductKind.MP4_CHT.value],
-        "muxed_mkv_artifact_id": product_ids[ProductKind.MKV_HEVC.value],
-        "hevc_intermediate_artifact_id": hevc_id,
-    })
-    torrent_ids = {}
-    for key, product_id in product_ids.items():
-        torrent = workstation.pipeline.create_torrent(
-            workspace=root, episode_id=identifier, content_artifact_id=product_id,
-            profile=torrent_profile or {"format": "v1"}, output=config.torrent_paths()[key],
-            force=force,
+    product_ids = {}
+    if "hardsub_chs" in executions:
+        product_ids[ProductKind.MP4_CHS.value] = executions["hardsub_chs"]["artifacts"][0]["artifact_id"]
+    if "hardsub_cht" in executions:
+        product_ids[ProductKind.MP4_CHT.value] = executions["hardsub_cht"]["artifacts"][0]["artifact_id"]
+    if ProductKind.MKV_HEVC.value in selection.products:
+        hevc_id = executions["hevc"]["artifacts"][0]["artifact_id"]
+        mux = workstation.pipeline.create_production_request(
+            workspace=root, episode_id=identifier, operation="mux_subtitle",
+            video_artifact_id=hevc_id, subtitle_artifact_ids=(chs_snapshot_id, cht_id),
+            font_artifact_ids=font_ids, output_profile="mkv-subtitle",
+            output_target=products[ProductKind.MKV_HEVC.value],
+            parameters={"default_subtitle_ordinal": 0},
         )
-        torrent_ids[key] = torrent["artifacts"][0]["artifact_id"]
-    pipeline_payload_step(root, workflow_id=config.workflow_id, phase="delivery",
-                          step="delivery.create_torrents", payload=torrent)
-    update_manifest(root, torrents=torrent_ids)
+        mux_result = workstation.pipeline.execute_production_request(
+            mux["request"]["request_id"], workspace=root, force=force
+        )
+        mux_step = pipeline_payload_step(
+            root, workflow_id=config.workflow_id, phase="delivery",
+            step="delivery.mux_subtitles", payload=mux_result,
+        )
+        if mux_step["status"] not in {"succeeded", "skipped"}:
+            refresh_summary(root)
+            return mux_step
+        product_ids[ProductKind.MKV_HEVC.value] = mux_result["artifacts"][0]["artifact_id"]
+    product_updates = {
+        _PRODUCT_MANIFEST_FIELDS[key]: artifact_id
+        for key, artifact_id in product_ids.items()
+    }
+    if ProductKind.MKV_HEVC.value in selection.products:
+        product_updates["hevc_intermediate_artifact_id"] = hevc_id
+    if product_updates:
+        update_manifest(root, products=product_updates)
+    torrent_ids = {}
+    if selection.create_torrents:
+        last_torrent = None
+        for key in selection.products:
+            product_id = product_ids[key]
+            last_torrent = workstation.pipeline.create_torrent(
+                workspace=root, episode_id=identifier, content_artifact_id=product_id,
+                profile=config.delivery.torrent_profile, output=config.torrent_paths()[key],
+                force=force,
+            )
+            torrent_ids[key] = last_torrent["artifacts"][0]["artifact_id"]
+        pipeline_payload_step(
+            root, workflow_id=config.workflow_id, phase="delivery",
+            step="delivery.create_torrents", payload=last_torrent,
+        )
+        update_manifest(root, torrents=torrent_ids)
     summary = refresh_summary(root)
-    return {"status": summary["delivery"]["status"], "manifest": load_manifest(root),
-            "summary": summary, "products": product_ids, "torrents": torrent_ids}
+    all_products = tuple(item.value for item in ProductKind)
+    manifest = load_manifest(root)
+    products_complete = all(
+        manifest.get("products", {}).get(_PRODUCT_MANIFEST_FIELDS[key]) for key in all_products
+    )
+    torrents_complete = all(manifest.get("torrents", {}).get(key) for key in all_products)
+    return {
+        "status": "succeeded" if products_complete and torrents_complete else "partial",
+        "manifest": manifest,
+        "summary": summary,
+        "selection": selection.to_dict(),
+        "products": product_ids,
+        "torrents": torrent_ids,
+        "completed_products": [
+            key for key in all_products
+            if manifest.get("products", {}).get(_PRODUCT_MANIFEST_FIELDS[key])
+        ],
+        "deferred_products": [
+            key for key in all_products
+            if not manifest.get("products", {}).get(_PRODUCT_MANIFEST_FIELDS[key])
+        ],
+    }
 
 
 def run_delivery_step(step: str, episode_dir: Path | str, *, episode_id: str | None = None,

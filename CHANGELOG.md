@@ -2,6 +2,23 @@
 
 All notable changes to `bmlsub` are recorded here.
 
+## 1.1.1 — 2026-07-20
+
+### Workstation experience
+
+- Add the guided `workstation start` fast mode, scoped local production, safe rebuild planning, and explicit handoff to external delivery.
+- Add consistent Chinese and English interactive interfaces selected at TTY startup, with explicit Enter-to-default guidance.
+- Add transcript text export and expanded workstation inspection, planning, and state snapshots.
+
+### Credentials and delivery
+
+- Distinguish bmlsub credential profile names from OpenSSH Host aliases and resolve the selected SSH profile before saving publication settings.
+- Make `workstation start delivery --configure` force the TTY credential wizard even for a complete plan; the wizard distinguishes profile reuse, repair, and creation and collects the full R2 credential triplet for Keychain storage.
+- Add a concise credential/path summary, product-level confirmations in R2 → VPS → qB → Anibt order, `--verbose-plan`, and `-y/--yes` automatic execution with normal fingerprint reuse.
+- Separate the VPS host `publish.remote_root` from the qBittorrent Docker-container `publish.qb_save_path`, which defaults to `/downloads`.
+- Add explicit qB add/start/recheck parameters and a conservative migration for matching incomplete tasks that used the legacy host save path; migration removes only the qB task record with `deleteFiles=false`.
+- Show both filesystem namespaces in the delivery plan and configuration guidance.
+
 ## 1.0.0 — 2026-07-18
 
 First stable release of the public headless production and release core.

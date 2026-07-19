@@ -643,7 +643,7 @@ class Pipeline:
     def seed_qbittorrent(
         self, *, workspace: Path | str, episode_id: str,
         torrent_artifact_id: str, content_artifact_id: str,
-        remote_content_artifact_id: str,
+        remote_content_artifact_id: str, remote_torrent_artifact_id: str,
         profile: QBittorrentSeedProfile | dict[str, Any],
         client: QBittorrentClient | None = None, ssh: Path | str = "ssh",
         username_env: str = "QB_USERNAME", password_env: str = "QB_PASSWORD",
@@ -693,6 +693,7 @@ class Pipeline:
             torrent_artifact_id=torrent_artifact_id,
             content_artifact_id=content_artifact_id,
             remote_content_artifact_id=remote_content_artifact_id,
+            remote_torrent_artifact_id=remote_torrent_artifact_id,
             profile=profile, client=client, credential_reference=credential_reference,
             store=self.store, state_dir=self.state_dir, force=force,
         ).to_dict()

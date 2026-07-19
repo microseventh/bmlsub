@@ -17,7 +17,7 @@ from .credentials import QBittorrentCredentials
 from .external_profiles import QBittorrentSeedProfile
 
 
-QB_ADAPTER_VERSION = "qbittorrent-ssh-tunnel-v2"
+QB_ADAPTER_VERSION = "qbittorrent-ssh-tunnel-v5"
 QB_VALIDATOR_VERSION = "qbittorrent-seed-validator-v1"
 QB_SEED_RECEIPT_SCHEMA = "qb-seed-receipt-v1"
 _ALLOWED_STATES = {"uploading", "stalledUP", "forcedUP", "queuedUP", "pausedUP"}
@@ -88,16 +88,28 @@ class SSHQBittorrentClient:
                        alternate_hashes: tuple[str, ...] = ()) -> SeedIdentity:
         used_fallback = False
         query_hashes = (expected_hash, *alternate_hashes)
+        torrent_name = torrent_path.name
+        torrent_bytes = torrent_path.read_bytes()
         with self._session(profile) as (session, base_url):
             existing = self._query_any(session, base_url, query_hashes)
+            if existing is not None:
+                mapping = self._mapping_status(
+                    existing, query_hashes, expected_name, expected_size,
+                    profile.save_path, legacy_save_path=profile.legacy_host_save_path,
+                )
+                if mapping == "legacy":
+                    self._delete_task(session, base_url, existing.torrent_hash)
+                    existing = None
+                elif not self._is_complete(existing):
+                    self._start_task(session, base_url, existing.torrent_hash)
+                    self._recheck_task(session, base_url, existing.torrent_hash)
             if existing is None:
                 try:
-                    with torrent_path.open("rb") as handle:
-                        response = session.post(
-                            f"{base_url}/api/v2/torrents/add",
-                            files={"torrents": (torrent_path.name, handle, "application/x-bittorrent")},
-                            data=self._add_fields(profile), timeout=60,
-                        )
+                    response = session.post(
+                        f"{base_url}/api/v2/torrents/add",
+                        files={"torrents": (torrent_name, torrent_bytes, "application/x-bittorrent")},
+                        data=self._add_fields(profile), timeout=60,
+                    )
                     self._expect_add(response)
                 except BmlsubError as exc:
                     fallback_status = exc.details.get("status")
@@ -110,17 +122,21 @@ class SSHQBittorrentClient:
                     )
                     self._expect_add(response)
                     used_fallback = True
+                self._start_task(session, base_url, expected_hash)
+                self._recheck_task(session, base_url, expected_hash)
             deadline = time.monotonic() + profile.poll_timeout
             while True:
                 identity = self._query_any(session, base_url, query_hashes)
                 if identity is not None and identity.state not in _CHECKING_STATES:
-                    result = SeedIdentity(**{**identity.__dict__, "used_magnet_fallback": used_fallback})
-                    self._validate(result, query_hashes, expected_name, expected_size, profile.save_path)
-                    return result
+                    if self._is_complete(identity):
+                        result = SeedIdentity(**{**identity.__dict__, "used_magnet_fallback": used_fallback})
+                        self._validate(result, query_hashes, expected_name, expected_size, profile.save_path)
+                        return result
                 if time.monotonic() >= deadline:
                     raise BmlsubError(
                         "qBittorrent did not finish content checking before timeout",
                         code=ErrorCode.EXTERNAL_SERVICE_ERROR, retryable=True,
+                        details=(identity.bounded() if identity is not None else {}),
                     )
                 time.sleep(profile.poll_interval)
 
@@ -130,6 +146,75 @@ class SSHQBittorrentClient:
             if identity is None:
                 raise BmlsubError("qBittorrent task is missing", code=ErrorCode.INPUT_MISSING)
             return identity
+
+    @staticmethod
+    def _delete_task(session: requests.Session, base_url: str, torrent_hash: str) -> None:
+        response = session.post(
+            f"{base_url}/api/v2/torrents/delete",
+            data={"hashes": torrent_hash, "deleteFiles": "false"}, timeout=30,
+        )
+        if response.status_code != 200:
+            raise BmlsubError(
+                "qBittorrent could not replace the incomplete task",
+                code=ErrorCode.EXTERNAL_SERVICE_ERROR,
+                retryable=response.status_code >= 500,
+                details={"status": response.status_code},
+            )
+
+    @staticmethod
+    def _start_task(session: requests.Session, base_url: str, torrent_hash: str) -> None:
+        response = session.post(
+            f"{base_url}/api/v2/torrents/start",
+            data={"hashes": torrent_hash}, timeout=30,
+        )
+        if response.status_code == 404:
+            response = session.post(
+                f"{base_url}/api/v2/torrents/resume",
+                data={"hashes": torrent_hash}, timeout=30,
+            )
+        if response.status_code != 200:
+            raise BmlsubError(
+                "qBittorrent rejected the task start request",
+                code=ErrorCode.EXTERNAL_SERVICE_ERROR,
+                retryable=response.status_code >= 500,
+                details={"status": response.status_code},
+            )
+
+    @staticmethod
+    def _recheck_task(session: requests.Session, base_url: str, torrent_hash: str) -> None:
+        response = session.post(
+            f"{base_url}/api/v2/torrents/recheck",
+            data={"hashes": torrent_hash}, timeout=30,
+        )
+        if response.status_code != 200:
+            raise BmlsubError(
+                "qBittorrent rejected the content recheck",
+                code=ErrorCode.EXTERNAL_SERVICE_ERROR,
+                retryable=response.status_code >= 500,
+                details={"status": response.status_code},
+            )
+
+    @staticmethod
+    def _is_complete(identity: SeedIdentity) -> bool:
+        return (identity.progress >= 1.0 and identity.amount_left == 0
+                and identity.state in _ALLOWED_STATES)
+
+    @staticmethod
+    def _mapping_status(identity: SeedIdentity, expected_hashes: tuple[str, ...],
+                        expected_name: str, expected_size: int,
+                        expected_save_path: str,
+                        legacy_save_path: str | None = None) -> str:
+        hashes = {value.lower() for value in expected_hashes}
+        if identity.torrent_hash not in hashes or identity.name != expected_name:
+            raise BmlsubError("qBittorrent torrent identity does not match", code=ErrorCode.OUTPUT_VALIDATION_FAILED)
+        if identity.total_size != expected_size:
+            raise BmlsubError("qBittorrent content mapping does not match", code=ErrorCode.OUTPUT_VALIDATION_FAILED)
+        actual_path = identity.save_path.rstrip("/")
+        if actual_path == expected_save_path.rstrip("/"):
+            return "expected"
+        if legacy_save_path and actual_path == legacy_save_path.rstrip("/"):
+            return "legacy"
+        raise BmlsubError("qBittorrent content mapping does not match", code=ErrorCode.OUTPUT_VALIDATION_FAILED)
 
     @contextmanager
     def _session(self, profile: QBittorrentSeedProfile) -> Iterator[tuple[requests.Session, str]]:
@@ -184,7 +269,8 @@ class SSHQBittorrentClient:
         return {
             "savepath": profile.save_path, "category": profile.category,
             "tags": ",".join(profile.tags), "paused": "false",
-            "skip_checking": "false", "root_folder": "false",
+            "skip_checking": "false", "sequentialDownload": "false",
+            "firstLastPiecePrio": "false", "root_folder": "false",
         }
 
     @staticmethod
@@ -246,7 +332,20 @@ class SSHQBittorrentClient:
         if identity.total_size != expected_size or identity.save_path.rstrip("/") != expected_save_path.rstrip("/"):
             raise BmlsubError("qBittorrent content mapping does not match", code=ErrorCode.OUTPUT_VALIDATION_FAILED)
         if identity.progress < 1.0 or identity.amount_left != 0 or identity.state not in _ALLOWED_STATES:
-            raise BmlsubError("qBittorrent task is not a complete seeding task", code=ErrorCode.OUTPUT_VALIDATION_FAILED)
+            raise BmlsubError(
+                "qBittorrent task is not a complete seeding task",
+                code=ErrorCode.OUTPUT_VALIDATION_FAILED,
+                details={
+                    "torrent_hash": identity.torrent_hash,
+                    "name": identity.name,
+                    "state": identity.state,
+                    "progress": identity.progress,
+                    "amount_left": identity.amount_left,
+                    "total_size": identity.total_size,
+                    "save_path": identity.save_path,
+                    "expected_save_path": expected_save_path,
+                },
+            )
 
 
 def validate_seed_identity(identity: SeedIdentity, *, expected_hash: str,

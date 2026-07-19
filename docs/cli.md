@@ -16,7 +16,7 @@ transcribe
 production create | show | list | execute
 credentials import-json | upsert-secret | list | get | create | update | delete | status | validate | probe
 release create-torrent | upload-r2 | pull-remote | seed-qbittorrent | publish-anibt
-workstation preprocess | delivery | publish | status
+workstation start | rebuild | preprocess | delivery | publish | status
 run show
 ```
 
@@ -29,7 +29,10 @@ Implemented details:
 - Production create accepts only encode, hardsub, or mux_subtitle and the four matching output Profiles. Execute defaults to ffmpeg/ffprobe/mkvmerge and a 7200-second process timeout.
 - Credential secret files must pass secure-file validation. Delete and probe require explicit confirmation flags.
 - External release commands require `--confirm-external-action`; local torrent creation does not.
-- `workstation series show --workspace <episode>` strictly loads the direct-parent `bgminfo/series.json`. `workstation series create` creates `<parent>/<series-folder>/bgminfo/series.json`; omitted parent defaults to `~/Downloads`. It requires the folder name, titles, romanized title, and groups; production/publish JSON and IDs are optional. Existing metadata is refused unless `--replace` is explicit. `--interactive` asks the same questions on stderr while preserving one final stdout JSON document.
+- Workstation has three user-facing entry points: interactive fast mode `bmlsub workstation start`, interactive external delivery `bmlsub workstation start delivery`, and unattended external delivery `bmlsub workstation start delivery -y`. An interactive TTY first asks for 中文 or English; pressing Enter explicitly selects Chinese. The selected language is used consistently for the rest of that invocation. Prompts with defaults state `Press Enter to use the default: ...`; non-interactive JSON output and machine-readable status fields are unchanged.
+- `workstation start delivery` performs local credential/path/input checks, prints a concise summary, and confirms product actions in R2 → VPS pull → qB seed → Anibt order. `--verbose-plan` prints complete file mappings; `--configure` opens the credential wizard even when the plan is otherwise complete.
+- `-y/--yes` skips delivery prompts and uses existing validated configuration. It preserves Stage fingerprint and receipt reuse and is not equivalent to `--force`. Missing or invalid credentials return `needs_review`. `--resume` and `--restart` express recovery intent without deleting external resources.
+- Series creation asks only for Simplified title/group names by default. Traditional values are produced with the Taiwan conversion provider. A failure is atomically recorded as pending state in `series.json`; retry with `workstation series retry-traditionalization --series-root PATH`. Pending names block production naming but do not require re-entering the source text.
 - Workstation preprocess discovers one top-level source, extracts one English reference subtitle and Japanese audio, and can run configured Whisper jobs. Delivery inherits release names and Production Profiles from the direct parent `bgminfo/series.json`; explicit CLI values are episode overrides. Full delivery validates the CHS ASS/Aegisub-font handoff, creates CHS/CHT snapshots, records non-blocking font diagnostics, builds three products and matching torrents.
 - `workstation delivery --step` performs a real single step. Choices are `validate_subtitles_fonts`, `encode_hevc`, `encode_hardsub_chs`, `encode_hardsub_cht`, `mux_subtitles`, and `create_torrents`; `all`/`delivery` run the full flow. A single step consumes prerequisite Artifact IDs already recorded in `manifest.json` and never runs the full delivery implicitly.
 - Publish returns `awaiting_confirmation` until `--confirm-external-action` is present. Workstation state always lives below `<episode>/workstation/state`; readable snapshots include resolved config/manifest/summary and may include redacted `credentials-status.json` and a scoped `release-batch.json`.

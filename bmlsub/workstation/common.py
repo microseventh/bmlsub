@@ -52,6 +52,7 @@ def ensure_directories(workspace: Path | str) -> dict[str, Path]:
         "artifacts": root / "state" / "artifacts",
         "reference": root / "preprocess" / "reference",
         "audio": root / "preprocess" / "audio",
+        "audio_chunks": root / "preprocess" / "audio" / "chunks",
         "transcripts": root / "preprocess" / "transcripts",
         "subtitles": root / "delivery" / "subtitles",
         "subtitle_analysis": root / "delivery" / "subtitle-analysis",

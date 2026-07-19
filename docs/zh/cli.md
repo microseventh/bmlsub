@@ -107,6 +107,68 @@ Profile 的真实字段见[Python API 与 Profile](python-api.md)。
 
 精确 Profile 字段见[发布](release.md)。
 
+## `workstation start`
+
+```bash
+bmlsub workstation start [--series-root PATH] [--episode-id ID] [--execute]
+```
+
+统一入口先解析番组根目录；省略 `--series-root` 时使用当前目录，也可传入数字单集目录并解析其直接父目录。交互式 TTY 启动后首先选择“中文 / English”，直接按 Enter 明确默认使用中文；本次命令之后的所有问答和摘要统一使用所选语言。所有可采用默认值的输入都会完整提示“直接按 Enter 使用默认值：…”，而“留空表示不设置”的字段会单独说明。非交互模式不增加语言问答，stdout JSON、状态码和配置字段保持不变。命令严格检查 `bgminfo/series.json`，交互终端缺失时进入问答创建；`--init-template` 只生成 `bgminfo/series.template.json`。配置有效后列出直接数字子目录，选择单集，并优先依据 SQLite/manifest/summary、否则依据顶层物理文件保守识别阶段。
+
+当识别到人工交接已完成、进入本地生产时，`start` 会先显示正式字幕、字体、简繁命名、继承的 HEVC/H.264 Profile、目标路径和可复用产物，然后询问压制范围：`1` 完整压制（默认，三个视频和 Torrent）、`2` 仅简繁内封 MKV、`3` 仅简繁内嵌 MP4、`4` 自定义产品。局部范围还会询问是否制作所选产品的 Torrent，最后只做一次总确认；确认前不会登记 Artifact 或启动编码。
+
+非交互模式可使用 `--delivery-scope full|mkv|mp4|custom`、重复的 `--delivery-product mp4_chs|mp4_cht|mkv_hevc` 和 `--delivery-torrents selected|none`。规划只读取 `bgminfo` 和当前文件，执行仍复用 StageRunner；再次运行会跳过有效产物。局部生产不会触发发布，只有三类视频和 Torrent 都完成后才进入 publish。
+
+普通 `start` 在本地生产完成后只报告已完成状态，并明确提示下一步使用 `bmlsub workstation start delivery`；它不会执行文件上传、远程拉取、做种或 Anibt 发布。
+
+## Workstation 快速模式入口
+
+普通用户只需要记住三个命令：
+
+```bash
+# Workstation 交互式快速模式
+bmlsub workstation start
+
+# Workstation 交互式外部交付
+bmlsub workstation start delivery
+
+# 外部交付无人值守模式
+bmlsub workstation start delivery -y
+```
+
+单独的 `--series-root`、`--episode-id`、`--execute`、`--transcription` 和 delivery selection 参数属于高级参数化调用，不是普通快速模式的必需输入。交互式快速模式会在终端中完成单集、转录策略、本地产品范围和执行确认的选择。
+
+
+### `workstation start delivery`
+
+高级参数形式：
+
+```bash
+bmlsub workstation start delivery \
+  [--configure] [-y|--yes] [--resume|--restart] [--verbose-plan] [--force]
+```
+
+默认模式先检查 Credential Manifest、macOS Keychain 中的 R2/qB/Anibt Profile、SSH alias 和公开路径配置，然后只打印一次简洁摘要。`--configure` 在 TTY 中强制进入凭证/交付配置向导；`-y/--yes` 使用现有配置和 Keychain，不询问 Secret 或确认，适合无人值守外部交付。正式链路中视频和 `.torrent` 都先上传 R2，再分别拉到 VPS 平铺目录并验证；qB Web API 使用本地已经由 libtorrent 验证的同一 Torrent Artifact 上传，远端 Torrent receipt 作为 R2/VPS 副本一致性的必需证据，不再通过 SSH 把二进制种子读回本机。`publish.remote_root` 严格表示 VPS 宿主机平铺目录，例如 `/data/dcapp/qb/downloads`；`publish.qb_save_path` 严格表示 qB Docker 容器内目录，默认 `/downloads`，两者由 Docker volume 映射连接相同文件名。若已有同 hash/name/size 的不完整任务位于已知错误宿主机路径，只删除 qB 任务记录（`deleteFiles=false`）后按容器路径重加；其他未知 save path 一律阻断。R2 object key 继续按 `<series>/<episode>/<filename>` 分层。若公开发布配置或 credential alias 不完整，TTY 模式可进入配置问答：优先列出并复用本机已有可用 Profile；首次缺少 Credential Manifest 时创建非敏感 `0600` Manifest；新建 R2/qB/Anibt Profile 时用隐藏输入把 Secret 直接存入 macOS Keychain，SSH 只引用 `~/.ssh/config`。非敏感路径和 alias 经确认后原子写入 `series.json`，已有 NOTE 和 Production 配置保持不变。
+
+配置完成仍不会自动发布，而是回到简洁摘要和交付确认。交互式外部交付按全部 R2 → 全部 VPS 拉取 → 全部 qB → 全部 Anibt 的顺序逐产品确认；`-y` 自动接受这些确认。每类 Profile 都可在 `--configure` 向导中选择复用 available、修复 unavailable 或新建。R2 新建/修复会询问 Account ID、Access Key ID 和隐藏输入的 Secret Access Key，并直接写入 macOS Keychain。`-y` 保留 Stage 指纹和 receipt 复用，不等于 `--force`；凭证缺失时返回 `needs_review`。自定义 Credential Manifest 可用 `--credential-manifest PATH`，该运行时路径不会写入 `series.json`。
+
+预处理执行前会选择转录策略：`quick` 只执行一次 direct；`full`（默认）分别登记 direct 完整转录和 chunked 切片转录；`none` 不调用 Whisper，但仍生成归档音频和转录 WAV。参数模式使用 `--transcription quick|full|none`。
+## `workstation rebuild`
+
+```bash
+bmlsub workstation rebuild --series-root PATH --episode-id ID --target TARGET --confirm-rebuild
+```
+
+TARGET 可为完整 `preprocess`、完整 `delivery`，或一个真实 delivery 单步。重建始终使用底层 `force=True`，保留历史和 validator，不删除状态；没有 publish target，不会重做 R2、远端、qB 或 Anibt。交互模式可选择单集、范围和转录策略。
+
+番组初始化只输入简体番名和简体制作组；繁体字段由 Taiwan 转换 provider 自动生成。转换失败会把原文、错误和 pending 状态写入 `bgminfo/series.json`，不会伪造繁体值。下次 `workstation start` 可重试，或使用：
+
+```bash
+bmlsub workstation series retry-traditionalization --series-root PATH
+```
+
+繁化未完成时允许查看配置，但阻断需要正式繁体命名的本地生产和发布。
+
 ## `workstation series show | create`
 
 - `workstation series show --workspace <数字单集目录>`：从单集直接父级读取、严格验证并显示 `bgminfo/series.json`。
@@ -117,7 +179,7 @@ Profile 的真实字段见[Python API 与 Profile](python-api.md)。
 ## `workstation preprocess | delivery | publish | status`
 
 - `workstation preprocess --workspace EPISODE [--episode-id ID]`：只在顶层源视频唯一时自动选择，提取一个英语参考字幕、日语音频，并可执行配置的 Whisper job。
-- `delivery`：默认从直接父级 `bgminfo/series.json` 继承制作组、番名和 Production Profile；显式 CLI 参数仅作为本集覆盖。完整模式验证正式简日 ASS 和顶层 Aegisub 字体包，生成工作站简繁字幕、非阻断字体诊断、三类视频和同完整文件名 Torrent。
+- `delivery`：默认从直接父级 `bgminfo/series.json` 继承制作组、番名和 Production Profile；显式 CLI 参数仅作为本集覆盖。完整模式验证正式简日 ASS 和顶层 Aegisub 字体包，生成工作站简繁字幕、非阻断字体诊断、三类视频和同完整文件名 Torrent。也可用 `--delivery-scope mkv|mp4|custom` 只生成所选产品；`--delivery-torrents none` 跳过 Torrent。局部完成返回 `partial`，不会伪记为完整本地生产。
 - `delivery --step STEP`：真实单步骤执行，choices 为 `validate_subtitles_fonts`、`encode_hevc`、`encode_hardsub_chs`、`encode_hardsub_cht`、`mux_subtitles`、`create_torrents`；`all`/`delivery` 表示完整流程。单步骤只消费 `manifest.json` 已登记的上游 Artifact，不会隐式先跑完整 delivery；缺少依赖时失败。
 - `publish --publish-config-json JSON [--confirm-external-action]`：未确认时返回 `awaiting_confirmation`，不调用 R2、SSH、qB 或 Anibt。
 - `status [--step STEP]`：读取 `workstation/state` 的可读快照。SQLite 权威状态固定为 `workstation/state/state.sqlite3`。解析后的配置写入 `config.json`；凭证可用性和发布批次可分别冻结为 `credentials-status.json`、`release-batch.json`。

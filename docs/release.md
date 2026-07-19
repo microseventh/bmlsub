@@ -2,7 +2,29 @@
 
 [中文](zh/release.md) · [Documentation home](../README.md)
 
-All external release CLI commands require confirmation; create-torrent is local.
+## Workstation delivery modes
+
+The normal user flow begins with interactive Workstation fast mode:
+
+```bash
+bmlsub workstation start
+```
+
+Once local products and Torrents are ready, use interactive delivery:
+
+```bash
+bmlsub workstation start delivery
+```
+
+For unattended delivery with previously validated credentials and configuration:
+
+```bash
+bmlsub workstation start delivery -y
+```
+
+Both delivery modes evaluate actions in R2 → VPS pull → qB seed → Anibt order. Interactive mode confirms each product action; `-y/--yes` accepts those confirmations automatically. Both retain Stage fingerprint, Artifact, receipt, and live validator checks, so valid prior results are reused. Fast unattended delivery is not a force mode: `--force` remains an explicit request to rerun Stage execution. `--resume` and `--restart` describe recovery intent, but neither deletes external files or withdraws releases.
+
+Before execution, Workstation validates the Credential Manifest, macOS Keychain payloads for R2/qB/Anibt, SSH identity, public paths, and local inputs. Missing or invalid credentials stop unattended mode with `needs_review`; secrets are never requested or emitted noninteractively.
 
 TorrentProfile accepts hybrid/v1, supported fixed piece lengths, private/comment/created_by, tracker URL, and timeout. libtorrent is the only backend.
 
@@ -10,7 +32,7 @@ R2UploadProfile requires bucket and object_key and controls content type, privat
 
 RemotePullProfile requires ssh_alias, rclone_remote, bucket, object_key, normalized absolute target_path, and bounded timeout. A connection profile may resolve/validate the SSH alias.
 
-QBittorrentSeedProfile requires ssh_alias, allows remote loopback host/port, absolute save_path, clean HTTPS origin, category/tags, polling, and v1 magnet fallback. The Stage consumes torrent, content, and remote-content receipt Artifacts.
+QBittorrentSeedProfile requires ssh_alias, allows remote loopback host/port, an absolute container `save_path` (default `/downloads`), clean HTTPS origin, category/tags, polling, and v1 magnet fallback. Workstation publication keeps the VPS host `publish.remote_root` separate from the Docker-container `publish.qb_save_path`; for example, `/data/dcapp/qb/downloads` may be volume-mapped to `/downloads`. Add requests explicitly disable paused, skip-checking, sequential-download, first/last-piece-priority, and root-folder modes, then use qB v5 start with a legacy resume fallback and request a recheck. A matching incomplete task at the known legacy host path is replaced with `deleteFiles=false`; any other unknown path remains blocked. The Stage consumes torrent, content, remote-content, and remote-torrent receipt Artifacts.
 
 AnibtPublishProfile supports id types bgm/anilist/mal/anidb, required anime ID/title, controlled resolution/language/subtitle/container enums, preview and Nyaa fields, and requires torrent-file mode. Preview and formal profiles fingerprint differently.
 

@@ -14,9 +14,10 @@ python -m pip install -e .
 
 ## 源码检查
 
-公开仓库不携带内部测试套件和私有验证媒体。发布前，维护者应在上传树之外运行内部检查，然后直接验证公开源码树：
+公开 GitHub 仓库保留 `tests/` 自动化回归测试和 `tools/` 通用维护工具，但不发布私有验证媒体、本地凭据、生成状态和操作者专用自动化。发布前先运行仓库测试，再直接验证已安装的公开包：
 
 ```bash
+python -m unittest discover -s tests
 python -m compileall -q bmlsub
 bmlsub --version
 bmlsub --help
@@ -35,7 +36,7 @@ python -m build
 python -m zipfile -l dist/*.whl
 ```
 
-归档只应包含包源码和当前文档，不得包含 `.claude/`、`tools/`、构建缓存、本地数据库、凭证、媒体、回执或私有验证路径。随后在干净环境中安装构建出的 wheel，再执行基础 CLI smoke。
+wheel 只应包含包源码和发行 metadata。sdist 可以额外包含仓库文档、`tests/` 和 `tools/`，但两种归档都不得包含 `.claude/`、构建缓存、本地数据库、凭据、媒体、回执或私有验证路径。随后在干净环境中安装构建出的 wheel，再执行基础 CLI smoke。
 
 ## 仓库清洁边界
 

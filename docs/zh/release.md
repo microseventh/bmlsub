@@ -2,7 +2,29 @@
 
 [English](../release.md) · [文档首页](README.md)
 
-CLI 中除 `create-torrent` 外的 release 子命令都强制 `--confirm-external-action`。以下 JSON 字段直接来自当前 Profile model；未知字段会被拒绝。
+## Workstation 交付模式
+
+普通用户先使用 Workstation 交互式快速模式：
+
+```bash
+bmlsub workstation start
+```
+
+本地产品和 Torrent 完成后，使用交互式外部交付：
+
+```bash
+bmlsub workstation start delivery
+```
+
+已有验证有效的凭证和配置时，可使用无人值守外部交付：
+
+```bash
+bmlsub workstation start delivery -y
+```
+
+两种交付模式都按 R2 → VPS 拉取 → qB 做种 → Anibt 发布的顺序评估。交互模式逐产品确认，`-y/--yes` 自动接受确认。两者都保留 Stage 指纹、Artifact、receipt 和 live validator 检查，因此有效结果会复用。无人值守模式不是强制重跑；只有显式 `--force` 才要求重新执行 Stage。`--resume` 和 `--restart` 表达恢复意图，但都不会删除远端文件或撤回发布。
+
+执行前会检查 Credential Manifest、macOS Keychain 中的 R2/qB/Anibt payload、SSH identity、公开路径和本地输入。凭证缺失或无效时，无人值守模式返回 `needs_review`，不会要求或输出明文 Secret。
 
 ## TorrentProfile
 
@@ -60,11 +82,13 @@ Pipeline 要求 manifest 与 profile alias 成对；不传 profile 时解析 env
 
 ## QBittorrentSeedProfile
 
-`ssh_alias` 必需。默认 host `127.0.0.1`（只允许远端 loopback）、port 8080、save path `/downloads`、poll 2 秒/1800 秒、允许 v1 magnet fallback。可选 clean HTTPS `webui_origin`、category、tags。
+`ssh_alias` 必需。默认 host `127.0.0.1`（只允许远端 loopback）、port 8080、容器内 save path `/downloads`、poll 2 秒/1800 秒、允许 v1 magnet fallback。可选 clean HTTPS `webui_origin`、category、tags。工作站发布时，`publish.remote_root` 是 VPS 宿主机目录，`publish.qb_save_path` 是 qB Docker 容器目录；例如宿主机 `/data/dcapp/qb/downloads` 通过 volume 映射到容器 `/downloads`。
 
 ```json
-{"ssh_alias":"media-vps","save_path":"/srv/media"}
+{"ssh_alias":"media-vps","save_path":"/downloads"}
 ```
+
+添加请求显式发送 `paused=false`、`skip_checking=false`、`sequentialDownload=false`、`firstLastPiecePrio=false` 和 `root_folder=false`，随后优先调用 qB v5 `start`（404 时回退旧版 `resume`）并执行 recheck。升级前若同一 hash/name/size 任务仍错误地使用宿主机 `remote_root`，工作站只删除任务记录（`deleteFiles=false`）后按容器路径重加；任意其他未知 save path 仍会阻断，不自动删除。
 
 Stage 同时消费 torrent、原内容和 remote-content receipt Artifact。成功条件由 adapter 对 qB 任务和内容状态验证。
 

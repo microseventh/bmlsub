@@ -1,3 +1,6 @@
+# Claude/operator-local automation
+.claude/
+
 # Python bytecode and build products
 __pycache__/
 *.py[cod]

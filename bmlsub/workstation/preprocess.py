@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ..media.tracks import languages_match
+from ..transcription import run_transcript_text_export
 from .common import discover_source_video, ensure_directories, open_workstation
 from .models import PreprocessConfig, WorkstationConfig
 from .series import discover_series_context
@@ -179,6 +180,8 @@ def run_preprocess(episode_dir: Path | str, *, episode_id: str | None = None,
 
     final = audio_step
     transcript_ids = {}
+    transcript_text_ids = {}
+    chunk_ids = {}
     for job in whisper_jobs:
         result = workstation.pipeline.transcribe(
             workspace=root, episode_id=identifier, audio_artifact_id=transcribe_id,
@@ -195,9 +198,36 @@ def run_preprocess(episode_dir: Path | str, *, episode_id: str | None = None,
         if final["status"] not in {"succeeded", "skipped"}:
             refresh_summary(root)
             return final
-        transcript_ids[job.name] = [item["artifact_id"] for item in final["outputs"]]
+        transcript_outputs = [item for item in final["outputs"]
+                              if item["artifact_type"].startswith("generated.transcript.")
+                              and not item["artifact_type"].startswith("generated.transcript.text.")]
+        transcript_ids[job.name] = [item["artifact_id"] for item in transcript_outputs]
+        chunks = [item["artifact_id"] for item in final["outputs"]
+                  if item["artifact_type"] == "generated.audio.transcription_chunk"]
+        if chunks:
+            chunk_ids[job.name] = chunks
+        for output in transcript_outputs:
+            mode = output["metadata"]["mode"]
+            exported = run_transcript_text_export(
+                workspace=root, episode_id=identifier,
+                transcript_artifact_id=output["artifact_id"], mode=mode,
+                model=output["metadata"]["model"], store=workstation.store,
+                state_dir=config.state_dir, force=force,
+            )
+            export_step = pipeline_payload_step(
+                root, workflow_id=config.workflow_id, phase="preprocess",
+                step=f"preprocess.export_transcript_text.{mode}", payload=exported,
+            )
+            if export_step["status"] not in {"succeeded", "skipped"}:
+                refresh_summary(root)
+                return export_step
+            transcript_text_ids[mode] = export_step["outputs"][0]["artifact_id"]
     if transcript_ids:
-        update_manifest(root, preprocess={"transcript_artifact_ids": transcript_ids})
+        update_manifest(root, preprocess={
+            "transcript_artifact_ids": transcript_ids,
+            "transcript_text_artifact_ids": transcript_text_ids,
+            "transcript_chunk_artifact_ids": chunk_ids,
+        })
     summary = refresh_summary(root)
     return {"status": summary["preprocess"]["status"], "plan": plan,
             "manifest": load_manifest(root), "summary": summary, "last_step": final}

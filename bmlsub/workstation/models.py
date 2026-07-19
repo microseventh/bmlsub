@@ -62,6 +62,21 @@ class TranscriptionJob:
         }
 
 
+def transcription_jobs_for_mode(mode: str) -> tuple[TranscriptionJob, ...]:
+    """Map one user-facing transcription policy to stable workstation jobs."""
+    normalized = mode.strip().lower()
+    if normalized == "none":
+        return ()
+    if normalized == "quick":
+        return (TranscriptionJob(name="direct", mode="direct"),)
+    if normalized == "full":
+        return (
+            TranscriptionJob(name="direct", mode="direct"),
+            TranscriptionJob(name="chunked", mode="chunked"),
+        )
+    raise ValueError("transcription mode must be quick, full, or none")
+
+
 @dataclass(frozen=True)
 class PreprocessConfig:
     source_video: Path | str | None = None
@@ -75,6 +90,78 @@ class PreprocessConfig:
             "reference_track": self.reference_track.to_dict(),
             "audio_track": self.audio_track.to_dict(),
             "whisper_jobs": [item.to_dict() for item in self.whisper_jobs],
+        }
+
+
+@dataclass(frozen=True)
+class DeliverySelection:
+    """User-facing local-production product and Torrent selection."""
+
+    products: tuple[str, ...] = (
+        ProductKind.MP4_CHS.value,
+        ProductKind.MP4_CHT.value,
+        ProductKind.MKV_HEVC.value,
+    )
+    create_torrents: bool = True
+    scope: str = "full"
+
+    def __post_init__(self) -> None:
+        allowed = tuple(item.value for item in ProductKind)
+        normalized = tuple(dict.fromkeys(self.products))
+        if not normalized:
+            raise ValueError("delivery selection requires at least one product")
+        unknown = [item for item in normalized if item not in allowed]
+        if unknown:
+            raise ValueError(f"unsupported delivery products: {', '.join(unknown)}")
+        if self.scope not in {"full", "mkv", "mp4", "custom"}:
+            raise ValueError("delivery scope must be full, mkv, mp4, or custom")
+        object.__setattr__(self, "products", tuple(item for item in allowed if item in normalized))
+
+    @classmethod
+    def for_scope(
+        cls, scope: str = "full", *, products: Sequence[str] = (),
+        create_torrents: bool = True,
+    ) -> "DeliverySelection":
+        normalized = scope.strip().lower()
+        mapped = {
+            "full": tuple(item.value for item in ProductKind),
+            "mkv": (ProductKind.MKV_HEVC.value,),
+            "mp4": (ProductKind.MP4_CHS.value, ProductKind.MP4_CHT.value),
+        }
+        if normalized == "custom":
+            return cls(tuple(products), create_torrents, normalized)
+        if products:
+            raise ValueError("explicit delivery products require scope=custom")
+        if normalized not in mapped:
+            raise ValueError("delivery scope must be full, mkv, mp4, or custom")
+        return cls(mapped[normalized], create_torrents, normalized)
+
+    @property
+    def steps(self) -> tuple[str, ...]:
+        steps = [
+            "delivery.snapshot_chs_subtitle",
+            "delivery.generate_cht_subtitle",
+            "delivery.publish_cht_subtitle",
+            "delivery.validate_subtitles_fonts",
+        ]
+        if ProductKind.MKV_HEVC.value in self.products:
+            steps.append("delivery.encode_hevc")
+        if ProductKind.MP4_CHS.value in self.products:
+            steps.append("delivery.encode_hardsub_chs")
+        if ProductKind.MP4_CHT.value in self.products:
+            steps.append("delivery.encode_hardsub_cht")
+        if ProductKind.MKV_HEVC.value in self.products:
+            steps.append("delivery.mux_subtitles")
+        if self.create_torrents:
+            steps.append("delivery.create_torrents")
+        return tuple(steps)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scope": self.scope,
+            "products": list(self.products),
+            "create_torrents": self.create_torrents,
+            "steps": list(self.steps),
         }
 
 
@@ -114,6 +201,7 @@ class PublishConfig:
     ssh_alias: str | None = None
     remote_dir: str | None = None
     qb_port: int = 8080
+    qb_save_path: str = "/downloads"
     qb_webui_origin: str | None = None
     bgm_id: int | None = None
     anime_id: str | None = None
@@ -132,6 +220,11 @@ class PublishConfig:
             remote = PurePosixPath(self.remote_dir)
             if not remote.is_absolute() or any(part in {"", ".", ".."} for part in remote.parts[1:]):
                 raise ValueError("remote_dir must be a normalized absolute POSIX path")
+        qb_path = PurePosixPath(self.qb_save_path)
+        if (not qb_path.is_absolute()
+                or any(part in {"", ".", ".."} for part in qb_path.parts[1:])):
+            raise ValueError("qb_save_path must be a normalized absolute POSIX path")
+        object.__setattr__(self, "qb_save_path", str(qb_path))
         if not 1 <= self.qb_port <= 65535:
             raise ValueError("qb_port is invalid")
         if self.bgm_id is not None and self.bgm_id <= 0:
@@ -150,10 +243,12 @@ class PublishConfig:
                       episode_id: str | None = None) -> str:
         if not self.remote_dir:
             raise ValueError("remote_dir is not configured")
-        base = PurePosixPath(self.remote_dir)
-        if series_folder_name and episode_id:
-            base = base / series_folder_name / episode_id
-        return str(base / Path(path).name)
+        return str(PurePosixPath(self.remote_dir) / Path(path).name)
+
+    def remote_save_path(self) -> str:
+        if not self.remote_dir:
+            raise ValueError("remote_dir is not configured")
+        return str(PurePosixPath(self.remote_dir))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -161,7 +256,7 @@ class PublishConfig:
             "r2_access": self.r2_access, "r2_public_base_url": self.r2_public_base_url,
             "rclone_remote": self.rclone_remote, "ssh_alias": self.ssh_alias,
             "remote_dir": self.remote_dir, "qb_port": self.qb_port,
-            "qb_webui_origin": self.qb_webui_origin, "bgm_id": self.bgm_id,
+            "qb_save_path": self.qb_save_path, "qb_webui_origin": self.qb_webui_origin, "bgm_id": self.bgm_id,
             "anime_id": self.anime_id, "notes": self.notes,
             "credential_manifest": str(self.credential_manifest) if self.credential_manifest else None,
             "r2_credential_profile": self.r2_credential_profile,
@@ -198,6 +293,8 @@ class WorkstationConfig:
         delivery: DeliveryConfig | None = None, publish: PublishConfig | None = None,
     ) -> "WorkstationConfig":
         metadata = context.metadata
+        if not metadata.title_cht or not metadata.group_cht:
+            raise ValueError("series_traditionalization_pending")
         names = ReleaseNames(
             metadata.group_chs, metadata.group_cht, metadata.title_chs,
             metadata.title_cht, metadata.romanized_title,
@@ -220,6 +317,7 @@ class WorkstationConfig:
             ssh_alias=publication.get("ssh_alias"),
             remote_dir=publication.get("remote_root"),
             qb_port=int(publication.get("qb_port", 8080)),
+            qb_save_path=str(publication.get("qb_save_path", "/downloads")),
             qb_webui_origin=publication.get("qb_webui_origin"),
             bgm_id=metadata.bgm_id, anime_id=metadata.anime_id,
             notes=str(publication.get("notes", "")),

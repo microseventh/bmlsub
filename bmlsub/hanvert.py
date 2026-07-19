@@ -430,6 +430,20 @@ def convert_ass(
     )
 
 
+def convert_plain_text(
+    text: str, *, converter: str = "Taiwan",
+    api_url: str = "https://api.zhconvert.org/convert", timeout: int = 60,
+    provider: ConverterProvider | None = None,
+) -> str:
+    """Convert one plain-text label without ASS parsing or file side effects."""
+    if not isinstance(text, str) or not text.strip() or "\x00" in text:
+        raise ValueError("plain text conversion input is invalid")
+    converted = (provider or fanhuaji_provider)(text, converter, api_url, timeout)
+    if not isinstance(converted, str) or not converted.strip() or "\x00" in converted:
+        raise ValueError("plain text conversion returned invalid text")
+    return converted.strip()
+
+
 # Legacy-friendly name without the unsafe fallback behavior.
 def convert_ass_with_fanhuaji(content: str, **kwargs) -> tuple[str, dict]:
     kwargs.pop("fallback_to_full_file", None)

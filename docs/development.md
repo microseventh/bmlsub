@@ -12,9 +12,10 @@ python -m pip install -e .
 
 ## Source checks
 
-The public repository is distributed without the internal test suite and private validation media. Before a release, maintainers should run the internal checks outside the upload tree, then validate the public tree directly:
+The public GitHub repository includes the automated regression tests in `tests/` and the reusable maintenance utilities in `tools/`. Private validation media, local credentials, generated state, and operator-specific automation are not published. Before a release, run the repository tests and then validate the installed public package directly:
 
 ```bash
+python -m unittest discover -s tests
 python -m compileall -q bmlsub
 bmlsub --version
 bmlsub --help
@@ -33,7 +34,7 @@ python -m build
 python -m zipfile -l dist/*.whl
 ```
 
-The archives must contain package source and current documentation only. They must not contain `.claude/`, `tools/`, build caches, local databases, credentials, media, receipts, or private validation paths. Install the built wheel into a clean environment and repeat the CLI smoke checks.
+The wheel must contain only package source and distribution metadata. The sdist may additionally contain the repository documentation, `tests/`, and `tools/`, but neither archive may contain `.claude/`, build caches, local databases, credentials, media, receipts, or private validation paths. Install the built wheel into a clean environment and repeat the CLI smoke checks.
 
 ## Repository hygiene
 

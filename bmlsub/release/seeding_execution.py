@@ -26,12 +26,13 @@ from .torrent import read_torrent_metadata
 
 QB_SEED_STAGE = "release.seed_qbittorrent"
 QB_SEED_ARTIFACT_TYPE = "generated.release.remote.seed"
-QB_SEED_EXECUTION_VERSION = "qb-seed-execution-v2"
+QB_SEED_EXECUTION_VERSION = "qb-seed-execution-v5"
 
 
 def run_qbittorrent_seed(*, workspace: Path | str, episode_id: str,
                          torrent_artifact_id: str, content_artifact_id: str,
                          remote_content_artifact_id: str,
+                         remote_torrent_artifact_id: str,
                          profile: QBittorrentSeedProfile | Mapping[str, Any],
                          client: QBittorrentClient, credential_reference: str,
                          store: SQLiteJobStore | None = None,
@@ -42,6 +43,7 @@ def run_qbittorrent_seed(*, workspace: Path | str, episode_id: str,
     torrent = get_current_artifact(ledger, torrent_artifact_id)
     content = get_current_artifact(ledger, content_artifact_id)
     remote_content = get_current_artifact(ledger, remote_content_artifact_id)
+    remote_torrent = get_current_artifact(ledger, remote_torrent_artifact_id)
     if torrent is None or torrent.artifact_type != "generated.release.torrent":
         raise BmlsubError("qBittorrent torrent Artifact is unavailable", code=ErrorCode.INPUT_MISSING)
     if content is None or not content.content_hash or content.episode_id != episode_id:
@@ -49,15 +51,26 @@ def run_qbittorrent_seed(*, workspace: Path | str, episode_id: str,
     if (remote_content is None or remote_content.artifact_type != "generated.release.remote.file"
             or remote_content.episode_id != episode_id):
         raise BmlsubError("qBittorrent remote content receipt is unavailable", code=ErrorCode.INPUT_MISSING)
+    if (remote_torrent is None or remote_torrent.artifact_type != "generated.release.remote.file"
+            or remote_torrent.episode_id != episode_id):
+        raise BmlsubError("qBittorrent remote torrent receipt is unavailable", code=ErrorCode.INPUT_MISSING)
     normalized = profile if isinstance(profile, QBittorrentSeedProfile) else QBittorrentSeedProfile.from_mapping(profile)
     remote_data = json.loads(remote_content.path.read_text(encoding="utf-8"))
+    remote_torrent_data = json.loads(remote_torrent.path.read_text(encoding="utf-8"))
     if remote_data.get("schema_version") != REMOTE_FILE_RECEIPT_SCHEMA:
         raise BmlsubError("remote content receipt schema is unsupported", code=ErrorCode.INPUT_MISSING)
+    if remote_torrent_data.get("schema_version") != REMOTE_FILE_RECEIPT_SCHEMA:
+        raise BmlsubError("remote torrent receipt schema is unsupported", code=ErrorCode.INPUT_MISSING)
     remote_file = remote_data.get("remote_file") or {}
     if (remote_data.get("source_artifact_id") != content.artifact_id
             or remote_file.get("size") != content.size
             or remote_file.get("sha256") != content.content_hash):
         raise BmlsubError("remote content receipt does not match the content Artifact", code=ErrorCode.INPUT_MISSING)
+    remote_torrent_file = remote_torrent_data.get("remote_file") or {}
+    if (remote_torrent_data.get("source_artifact_id") != torrent.artifact_id
+            or remote_torrent_file.get("size") != torrent.size
+            or remote_torrent_file.get("sha256") != torrent.content_hash):
+        raise BmlsubError("remote torrent receipt does not match the torrent Artifact", code=ErrorCode.INPUT_MISSING)
     metadata = read_torrent_metadata(torrent.path)
     if metadata.name != content.path.name or metadata.length != content.size:
         raise BmlsubError("torrent does not map the selected content Artifact", code=ErrorCode.INPUT_MISSING)
@@ -73,6 +86,8 @@ def run_qbittorrent_seed(*, workspace: Path | str, episode_id: str,
         "content_artifact_id": content.artifact_id, "content_hash": content.content_hash,
         "remote_content_artifact_id": remote_content.artifact_id,
         "remote_content_hash": remote_content.content_hash,
+        "remote_torrent_artifact_id": remote_torrent.artifact_id,
+        "remote_torrent_hash": remote_torrent.content_hash,
         "torrent_id": metadata.torrent_id,
     })
     parameter_fingerprint = fingerprint_parameters({
@@ -115,6 +130,10 @@ def run_qbittorrent_seed(*, workspace: Path | str, episode_id: str,
             "torrent_artifact_id": torrent.artifact_id,
             "content_artifact_id": content.artifact_id,
             "remote_content_artifact_id": remote_content.artifact_id,
+            "remote_torrent_artifact_id": remote_torrent.artifact_id,
+            "remote_torrent_path": remote_torrent_file["path"],
+            "torrent_source": "local-validated-artifact",
+            "r2_vps_torrent_receipt_artifact_id": remote_torrent.artifact_id,
             "profile": {key: value for key, value in normalized.normalized().items() if key != "version"},
             "seed": identity.bounded(),
         }
@@ -126,6 +145,10 @@ def run_qbittorrent_seed(*, workspace: Path | str, episode_id: str,
                 "torrent_artifact_id": torrent.artifact_id,
                 "content_artifact_id": content.artifact_id,
                 "remote_content_artifact_id": remote_content.artifact_id,
+                "remote_torrent_artifact_id": remote_torrent.artifact_id,
+                "remote_torrent_path": remote_torrent_file["path"],
+                "torrent_source": "local-validated-artifact",
+                "r2_vps_torrent_receipt_artifact_id": remote_torrent.artifact_id,
                 "torrent_id": identity.torrent_hash, "state": identity.state,
                 "remote_size": identity.total_size, "save_path": identity.save_path,
                 "receipt_schema": QB_SEED_RECEIPT_SCHEMA,
@@ -160,7 +183,8 @@ def run_qbittorrent_seed(*, workspace: Path | str, episode_id: str,
         adapter=adapter,
         inputs=(StageInputBinding(torrent.artifact_id, "torrent", 0),
                 StageInputBinding(content.artifact_id, "content", 0),
-                StageInputBinding(remote_content.artifact_id, "remote_content", 0)),
+                StageInputBinding(remote_content.artifact_id, "remote_content", 0),
+                StageInputBinding(remote_torrent.artifact_id, "remote_torrent", 0)),
         run_metadata={"ssh_alias": normalized.ssh_alias, "save_path": normalized.save_path,
                       "torrent_id": metadata.torrent_id},
         force=force,
