@@ -136,7 +136,7 @@ command -v ffmpeg ffprobe mkvmerge ssh
 Expected package version:
 
 ```text
-bmlsub 1.1.1
+bmlsub 1.1.2
 ```
 
 If `ffmpeg` or `ffprobe` resolves unexpectedly, confirm the linked tap formula with `brew info homebrew-ffmpeg/ffmpeg/ffmpeg` and inspect `brew --prefix` and `PATH`.
@@ -170,4 +170,4 @@ bmlsub workstation preprocess --workspace /path/to/series/01 --episode-id 01
 bmlsub workstation status --workspace /path/to/series/01
 ```
 
-Preprocess auto-selects only a unique top-level source video. Delivery inherits release names and Production Profiles from the direct-parent `bgminfo/series.json`, requires one formal CHS/JPN ASS and top-level Aegisub-collected fonts, and allows explicit episode overrides. Publication remains inert until `--confirm-external-action` is supplied.
+Preprocess auto-selects only a unique top-level source video. Delivery inherits release names and Production Profiles from the direct-parent `bgminfo/series.json`, requires one formal `<episode>.CHS&JPN.ass` and top-level Aegisub-collected fonts, and allows explicit episode overrides. Workstation then checks for an optional formal `<episode>.CHT&JPN.ass` (case-insensitive): if present, it registers and uses that subtitle directly for the `h264-cht` product and the CHT track in the MKV; if absent, it calls the configured Taiwan conversion provider to generate CHT from CHS. Publication remains inert until `--confirm-external-action` is supplied.

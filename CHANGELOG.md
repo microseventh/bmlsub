@@ -2,6 +2,14 @@
 
 All notable changes to `bmlsub` are recorded here.
 
+## 1.1.2 — 2026-07-21
+
+### Workstation subtitles
+
+- Detect and register an optional formal `<episode>.CHT&JPN.ass` alongside the required CHS/JPN ASS.
+- Prefer the human-authored CHT subtitle for the `h264-cht` product and the CHT track in the MKV; call the configured Taiwan conversion provider only when no formal CHT subtitle exists.
+- Document the CHS/CHT input precedence and add focused Workstation regression coverage.
+
 ## 1.1.1 — 2026-07-20
 
 ### Workstation experience

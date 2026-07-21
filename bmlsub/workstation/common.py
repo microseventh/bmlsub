@@ -142,6 +142,24 @@ def discover_production_subtitle(workspace: Path | str, episode_id: str,
     }
 
 
+def discover_traditional_subtitle(workspace: Path | str, episode_id: str) -> tuple[Path | None, dict[str, Any] | None]:
+    root = Path(workspace).expanduser().resolve()
+    expected = f"{episode_id}.cht&jpn.ass".lower()
+    candidates = tuple(sorted(
+        item.resolve() for item in root.iterdir()
+        if item.is_file() and item.name.lower() == expected
+    ))
+    if len(candidates) == 1:
+        return candidates[0], None
+    if candidates:
+        return None, {
+            "code": "traditional_subtitle_ambiguous",
+            "message": "multiple exact formal CHT subtitles were found",
+            "candidates": [str(item) for item in candidates],
+        }
+    return None, None
+
+
 def top_level_fonts(workspace: Path | str) -> tuple[Path, ...]:
     root = Path(workspace).expanduser().resolve()
     return tuple(sorted(

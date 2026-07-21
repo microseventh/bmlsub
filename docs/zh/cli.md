@@ -179,7 +179,7 @@ bmlsub workstation series retry-traditionalization --series-root PATH
 ## `workstation preprocess | delivery | publish | status`
 
 - `workstation preprocess --workspace EPISODE [--episode-id ID]`：只在顶层源视频唯一时自动选择，提取一个英语参考字幕、日语音频，并可执行配置的 Whisper job。
-- `delivery`：默认从直接父级 `bgminfo/series.json` 继承制作组、番名和 Production Profile；显式 CLI 参数仅作为本集覆盖。完整模式验证正式简日 ASS 和顶层 Aegisub 字体包，生成工作站简繁字幕、非阻断字体诊断、三类视频和同完整文件名 Torrent。也可用 `--delivery-scope mkv|mp4|custom` 只生成所选产品；`--delivery-torrents none` 跳过 Torrent。局部完成返回 `partial`，不会伪记为完整本地生产。
+- `delivery`：默认从直接父级 `bgminfo/series.json` 继承制作组、番名和 Production Profile；显式 CLI 参数仅作为本集覆盖。完整模式验证正式 `<集数>.CHS&JPN.ass` 和顶层 Aegisub 字体包，并检查可选的正式 `<集数>.CHT&JPN.ass`（文件名大小写不敏感）。已有繁体字幕时直接登记并用于 `h264-cht` 和 MKV 繁体字幕轨；没有时才通过配置的台湾繁化服务从简体字幕生成。随后执行非阻断字体诊断，生成所选视频和同完整文件名 Torrent。也可用 `--delivery-scope mkv|mp4|custom` 只生成所选产品；`--delivery-torrents none` 跳过 Torrent。局部完成返回 `partial`，不会伪记为完整本地生产。
 - `delivery --step STEP`：真实单步骤执行，choices 为 `validate_subtitles_fonts`、`encode_hevc`、`encode_hardsub_chs`、`encode_hardsub_cht`、`mux_subtitles`、`create_torrents`；`all`/`delivery` 表示完整流程。单步骤只消费 `manifest.json` 已登记的上游 Artifact，不会隐式先跑完整 delivery；缺少依赖时失败。
 - `publish --publish-config-json JSON [--confirm-external-action]`：未确认时返回 `awaiting_confirmation`，不调用 R2、SSH、qB 或 Anibt。
 - `status [--step STEP]`：读取 `workstation/state` 的可读快照。SQLite 权威状态固定为 `workstation/state/state.sqlite3`。解析后的配置写入 `config.json`；凭证可用性和发布批次可分别冻结为 `credentials-status.json`、`release-batch.json`。

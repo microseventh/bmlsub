@@ -277,10 +277,12 @@ class WorkstationStartTests(unittest.TestCase):
             episode = root / "01"
             (episode / "01.mkv").write_bytes(b"video")
             (episode / "01.CHS&JPN.ass").write_text("formal", encoding="utf-8")
+            (episode / "01.CHT&JPN.ass").write_text("traditional", encoding="utf-8")
             (episode / "font.ttf").write_bytes(b"font")
             selection = DeliverySelection.for_scope("mkv", create_torrents=False)
             plan = plan_delivery_execution(episode, selection=selection)
             self.assertEqual(plan["status"], "succeeded")
+            self.assertEqual(plan["traditional_subtitle"], str((episode / "01.CHT&JPN.ass").resolve()))
             self.assertEqual(plan["selection"]["products"], ["mkv_hevc"])
             self.assertEqual(plan["font_count"], 1)
             self.assertIn("delivery.encode_hevc", plan["steps"])
@@ -288,6 +290,20 @@ class WorkstationStartTests(unittest.TestCase):
             self.assertEqual(plan["targets"]["torrents"], {})
             self.assertFalse(plan["external_publish_allowed"])
             self.assertFalse((episode / "workstation").exists())
+
+    def test_traditional_subtitle_is_optional_in_delivery_plan(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.make_series(root)
+            episode = root / "01"
+            (episode / "01.mkv").write_bytes(b"video")
+            (episode / "01.CHS&JPN.ass").write_text("formal", encoding="utf-8")
+            (episode / "font.ttf").write_bytes(b"font")
+
+            plan = plan_delivery_execution(episode)
+
+            self.assertEqual(plan["status"], "succeeded")
+            self.assertIsNone(plan["traditional_subtitle"])
 
     def test_rebuild_plan_never_allows_publish(self):
         with TemporaryDirectory() as temporary:

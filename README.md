@@ -1,4 +1,4 @@
-# bmlsub 1.1.1
+# bmlsub 1.1.2
 
 `bmlsub` is a macOS/Apple Silicon local headless media-production core. Its public entries are the `bmlsub` CLI, `Pipeline`, and `CredentialService`. This page describes the capabilities implemented in this release, not planned features.
 
@@ -43,6 +43,8 @@ Use `bmlsub workstation rebuild` to force-rebuild preprocess, full local deliver
 
 Traditional series titles and group names are generated automatically from the Simplified values through the configured Taiwan conversion provider. Failed conversions are recorded in `bgminfo/series.json` as pending retry state; rerun `workstation start` or use `workstation series retry-traditionalization` instead of re-entering the Traditional text.
 
+For episode production, Workstation requires a formal `<episode>.CHS&JPN.ass` and also checks for an optional `<episode>.CHT&JPN.ass` (case-insensitive). When the formal CHT/JPN ASS exists, it is registered and used directly for the `h264-cht` product and the CHT track in the MKV. Only when it is absent does Workstation call the configured Taiwan conversion provider to generate CHT from CHS.
+
 ## Implemented capabilities
 
 - explicit registration, query, candidate matching, and confirmation for videos, ASS/SRT subtitles, fonts, chapters, and attachments;
@@ -55,7 +57,7 @@ Traditional series titles and group names are generated automatically from the S
 - three-phase episode workstation orchestration with direct-parent series/Profile inheritance, real single-step delivery, `workstation/state/state.sqlite3`, readable step/Artifact/credential/batch snapshots, non-blocking font diagnostics, parallel video products, torrents, and explicitly confirmed publication;
 - Run, Stage, Artifact, ProductionRequest, SQLite, fingerprints, stale detection, transactional output, and safe reuse.
 
-A `remux` enum exists in the model, but the CLI and executable Profile contract reject it; independent remux is not a 1.1.1 feature.
+A `remux` enum exists in the model, but the CLI and executable Profile contract reject it; independent remux is not a 1.1.2 feature.
 
 ## Current boundaries
 

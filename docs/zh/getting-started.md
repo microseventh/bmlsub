@@ -152,7 +152,7 @@ command -v ffmpeg ffprobe mkvmerge ssh
 预期包版本：
 
 ```text
-bmlsub 1.1.1
+bmlsub 1.1.2
 ```
 
 如果 `ffmpeg` 或 `ffprobe` 指向异常位置，请先通过 `brew info homebrew-ffmpeg/ffmpeg/ffmpeg` 确认 tap 公式已 linked，再检查 `brew --prefix` 和 `PATH`。
@@ -186,4 +186,4 @@ bmlsub workstation preprocess --workspace /path/to/series/01 --episode-id 01
 bmlsub workstation status --workspace /path/to/series/01
 ```
 
-预处理只自动接受唯一顶层源视频。交付从直接父级 `bgminfo/series.json` 继承发布命名和 Production Profile，要求正式简日 ASS 与顶层 Aegisub 字体，并允许显式单集覆盖。未传 `--confirm-external-action` 时，发布不会产生外部副作用。
+预处理只自动接受唯一顶层源视频。交付从直接父级 `bgminfo/series.json` 继承发布命名和 Production Profile，要求正式 `<集数>.CHS&JPN.ass` 与顶层 Aegisub 字体，并允许显式单集覆盖。Workstation 随后检查可选的正式 `<集数>.CHT&JPN.ass`（文件名大小写不敏感）：存在时直接登记，并用于 `h264-cht` 成品和 MKV 的繁体字幕轨；不存在时，才通过配置的台湾繁化服务从简体字幕生成繁体字幕。未传 `--confirm-external-action` 时，发布不会产生外部副作用。

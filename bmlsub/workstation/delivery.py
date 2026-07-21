@@ -15,7 +15,10 @@ from ..release.profiles import normalize_torrent_profile
 from ..state.fingerprints import fingerprint_file, fingerprint_parameters, fingerprint_tools, hash_json
 from ..state.models import Diagnostic, StageInputBinding
 from ..subtitle import SubtitleConversionOptions, run_subtitle_conversion
-from .common import discover_production_subtitle, discover_source_video, ensure_directories, open_workstation, top_level_fonts
+from .common import (
+    discover_production_subtitle, discover_source_video, discover_traditional_subtitle,
+    ensure_directories, open_workstation, top_level_fonts,
+)
 from .models import DeliveryConfig, DeliverySelection, WorkstationConfig
 from .series import discover_series_context
 from .naming import ProductKind
@@ -84,6 +87,7 @@ def plan_delivery_execution(
         "episode_id": identifier,
         "source_video": inputs["source_video"],
         "production_subtitle": inputs["production_subtitle"],
+        "traditional_subtitle": inputs["traditional_subtitle"],
         "fonts": inputs["fonts"],
         "font_count": len(inputs["fonts"]),
         "release_names": names.to_dict(),
@@ -139,8 +143,9 @@ def plan_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
     references = (Path(reference),) if reference else ()
     video, video_error = discover_source_video(root)
     subtitle, subtitle_error = discover_production_subtitle(root, identifier, production_subtitle, references)
+    traditional_subtitle, traditional_error = discover_traditional_subtitle(root, identifier)
     fonts = top_level_fonts(root)
-    errors = [item for item in (video_error, subtitle_error) if item]
+    errors = [item for item in (video_error, subtitle_error, traditional_error) if item]
     if not fonts:
         errors.append({"code": "input_missing", "message": "top-level Aegisub font package is missing"})
     needs_review = any(item["code"].endswith("ambiguous") for item in errors)
@@ -150,6 +155,7 @@ def plan_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
         "episode_dir": str(root), "episode_id": identifier,
         "source_video": str(video) if video else None,
         "production_subtitle": str(subtitle) if subtitle else None,
+        "traditional_subtitle": str(traditional_subtitle) if traditional_subtitle else None,
         "fonts": [str(item) for item in fonts],
         "release_names": release_names.to_dict() if release_names else None,
         "errors": errors,
@@ -215,13 +221,23 @@ def validate_translation_delivery(episode_dir: Path | str, *, episode_id: str | 
         language="zh-hans", force=force,
     )
     subtitle_id = subtitle_result["artifacts"][0]["artifact_id"]
+    subtitle_updates = {
+        "chs_source_artifact_id": subtitle_id,
+        "cht_source_artifact_id": None,
+    }
+    if plan["traditional_subtitle"]:
+        traditional_result = workstation.pipeline.register_subtitle(
+            Path(plan["traditional_subtitle"]), workspace=root, episode_id=identifier,
+            language="zh-hant", force=force,
+        )
+        subtitle_updates["cht_source_artifact_id"] = traditional_result["artifacts"][0]["artifact_id"]
     font_ids = []
     for font in plan["fonts"]:
         registered = workstation.pipeline.register_font(
             Path(font), workspace=root, episode_id=identifier, force=force
         )
         font_ids.append(registered["artifacts"][0]["artifact_id"])
-    update_manifest(root, subtitles={"chs_source_artifact_id": subtitle_id},
+    update_manifest(root, subtitles=subtitle_updates,
                     fonts={"artifact_ids": font_ids})
     payload = pipeline_payload_step(
         root, workflow_id=config.workflow_id, phase="translation",
@@ -322,46 +338,67 @@ def run_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
 
     chs_artifact = workstation.store.get_artifact(chs_snapshot_id)
     cht_target = paths["subtitles"] / f"{identifier}.cht&jpn.ass"
-    conversion = run_subtitle_conversion(
-        chs_artifact.path, cht_target, workspace=root, episode_id=identifier,
-        options=SubtitleConversionOptions(converter=converter, api_url=conversion_api_url,
-                                          timeout=conversion_timeout),
-        store=workstation.store, state_dir=config.state_dir,
-        source_artifact_id=chs_snapshot_id, artifact_type="workstation.subtitle.cht",
-        language="zh-hant", force=force,
-    )
-    conversion_step = result_step(root, workflow_id=config.workflow_id, phase="delivery",
-                                  step="delivery.generate_cht_subtitle", result=conversion,
-                                  inputs=(chs_artifact,))
-    if conversion_step["status"] not in {"succeeded", "skipped"}:
-        refresh_summary(root)
-        return conversion_step
-    cht_id = conversion_step["outputs"][0]["artifact_id"]
+    cht_source_id = manifest["subtitles"].get("cht_source_artifact_id")
+    if cht_source_id:
+        traditional_snapshot = _copy_stage(
+            workstation=workstation, source_artifact_id=cht_source_id, target=cht_target,
+            artifact_type="workstation.subtitle.cht", language="zh-hant",
+            stage_name="workstation.snapshot_cht_subtitle",
+            command_name="workstation.delivery.snapshot-cht", force=force,
+        )
+        traditional_step = result_step(
+            root, workflow_id=config.workflow_id, phase="delivery",
+            step="delivery.snapshot_cht_subtitle", result=traditional_snapshot,
+        )
+        if traditional_step["status"] not in {"succeeded", "skipped"}:
+            refresh_summary(root)
+            return traditional_step
+        cht_id = traditional_step["outputs"][0]["artifact_id"]
+    else:
+        conversion = run_subtitle_conversion(
+            chs_artifact.path, cht_target, workspace=root, episode_id=identifier,
+            options=SubtitleConversionOptions(converter=converter, api_url=conversion_api_url,
+                                              timeout=conversion_timeout),
+            store=workstation.store, state_dir=config.state_dir,
+            source_artifact_id=chs_snapshot_id, artifact_type="workstation.subtitle.cht",
+            language="zh-hant", force=force,
+        )
+        conversion_step = result_step(root, workflow_id=config.workflow_id, phase="delivery",
+                                      step="delivery.generate_cht_subtitle", result=conversion,
+                                      inputs=(chs_artifact,))
+        if conversion_step["status"] not in {"succeeded", "skipped"}:
+            refresh_summary(root)
+            return conversion_step
+        cht_id = conversion_step["outputs"][0]["artifact_id"]
     update_manifest(root, subtitles={"cht_workstation_artifact_id": cht_id})
 
     top_cht = root / f"{identifier}.cht&jpn.ass"
     cht_artifact = workstation.store.get_artifact(cht_id)
-    if top_cht.exists() and fingerprint_file(top_cht).content_hash != cht_artifact.content_hash:
-        payload = step_payload(
-            workflow_id=config.workflow_id, phase="delivery", step="delivery.publish_cht_subtitle",
-            status="needs_review", inputs=(cht_artifact,),
-            error={"code": "cht_conflict", "message": "top-level and workstation CHT subtitles differ"},
-            next_action="choose_manual_or_regenerated_cht",
+    if cht_source_id:
+        manual_cht_artifact = workstation.store.get_artifact(cht_source_id)
+        retained = step_payload(
+            workflow_id=config.workflow_id, phase="delivery",
+            step="delivery.publish_cht_subtitle", status="succeeded",
+            inputs=(cht_artifact,), outputs=(manual_cht_artifact,),
+            diagnostics=({
+                "code": "manual_cht_retained",
+                "message": "existing formal CHT subtitle was selected without conversion",
+            },),
         )
-        write_step(root, payload)
-        refresh_summary(root)
-        return payload
-    published = _copy_stage(
-        workstation=workstation, source_artifact_id=cht_id, target=top_cht,
-        artifact_type="workstation.subtitle.delivery.cht", language="zh-hant",
-        stage_name="workstation.publish_cht_subtitle",
-        command_name="workstation.delivery.publish-cht", force=force,
-    )
-    publish_step = result_step(root, workflow_id=config.workflow_id, phase="delivery",
-                               step="delivery.publish_cht_subtitle", result=published,
-                               inputs=(cht_artifact,))
-    cht_delivery_id = publish_step["outputs"][0]["artifact_id"]
-    update_manifest(root, subtitles={"cht_delivery_artifact_id": cht_delivery_id})
+        write_step(root, retained)
+        update_manifest(root, subtitles={"cht_delivery_artifact_id": cht_source_id})
+    else:
+        published = _copy_stage(
+            workstation=workstation, source_artifact_id=cht_id, target=top_cht,
+            artifact_type="workstation.subtitle.delivery.cht", language="zh-hant",
+            stage_name="workstation.publish_cht_subtitle",
+            command_name="workstation.delivery.publish-cht", force=force,
+        )
+        publish_step = result_step(root, workflow_id=config.workflow_id, phase="delivery",
+                                   step="delivery.publish_cht_subtitle", result=published,
+                                   inputs=(cht_artifact,))
+        cht_delivery_id = publish_step["outputs"][0]["artifact_id"]
+        update_manifest(root, subtitles={"cht_delivery_artifact_id": cht_delivery_id})
 
     analyses = []
     for key, subtitle_id in (("chs", chs_snapshot_id), ("cht", cht_id)):
