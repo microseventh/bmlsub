@@ -152,7 +152,7 @@ command -v ffmpeg ffprobe mkvmerge ssh
 预期包版本：
 
 ```text
-bmlsub 1.1.2
+bmlsub 1.1.3
 ```
 
 如果 `ffmpeg` 或 `ffprobe` 指向异常位置，请先通过 `brew info homebrew-ffmpeg/ffmpeg/ffmpeg` 确认 tap 公式已 linked，再检查 `brew --prefix` 和 `PATH`。

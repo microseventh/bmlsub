@@ -136,7 +136,7 @@ command -v ffmpeg ffprobe mkvmerge ssh
 Expected package version:
 
 ```text
-bmlsub 1.1.2
+bmlsub 1.1.3
 ```
 
 If `ffmpeg` or `ffprobe` resolves unexpectedly, confirm the linked tap formula with `brew info homebrew-ffmpeg/ffmpeg/ffmpeg` and inspect `brew --prefix` and `PATH`.

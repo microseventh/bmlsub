@@ -1,4 +1,4 @@
-# bmlsub 1.1.2
+# bmlsub 1.1.3
 
 `bmlsub` is a macOS/Apple Silicon local headless media-production core. Its public entries are the `bmlsub` CLI, `Pipeline`, and `CredentialService`. This page describes the capabilities implemented in this release, not planned features.
 
@@ -57,7 +57,7 @@ For episode production, Workstation requires a formal `<episode>.CHS&JPN.ass` an
 - three-phase episode workstation orchestration with direct-parent series/Profile inheritance, real single-step delivery, `workstation/state/state.sqlite3`, readable step/Artifact/credential/batch snapshots, non-blocking font diagnostics, parallel video products, torrents, and explicitly confirmed publication;
 - Run, Stage, Artifact, ProductionRequest, SQLite, fingerprints, stale detection, transactional output, and safe reuse.
 
-A `remux` enum exists in the model, but the CLI and executable Profile contract reject it; independent remux is not a 1.1.2 feature.
+A `remux` enum exists in the model, but the CLI and executable Profile contract reject it; independent remux is not a 1.1.3 feature.
 
 ## Current boundaries
 

@@ -100,7 +100,8 @@ class SSHQBittorrentClient:
                 if mapping == "legacy":
                     self._delete_task(session, base_url, existing.torrent_hash)
                     existing = None
-                elif not self._is_complete(existing):
+                elif (not self._is_complete(existing)
+                      and existing.state not in _CHECKING_STATES):
                     self._start_task(session, base_url, existing.torrent_hash)
                     self._recheck_task(session, base_url, existing.torrent_hash)
             if existing is None:
@@ -122,8 +123,6 @@ class SSHQBittorrentClient:
                     )
                     self._expect_add(response)
                     used_fallback = True
-                self._start_task(session, base_url, expected_hash)
-                self._recheck_task(session, base_url, expected_hash)
             deadline = time.monotonic() + profile.poll_timeout
             while True:
                 identity = self._query_any(session, base_url, query_hashes)

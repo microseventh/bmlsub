@@ -2,6 +2,13 @@
 
 All notable changes to `bmlsub` are recorded here.
 
+## 1.1.3 — 2026-07-21
+
+### qBittorrent seeding
+
+- Let newly added torrents complete qBittorrent's initial content check without immediately issuing redundant start and recheck requests.
+- Avoid restarting or rechecking an existing task while qBittorrent already reports it in a checking state.
+
 ## 1.1.2 — 2026-07-21
 
 ### Workstation subtitles

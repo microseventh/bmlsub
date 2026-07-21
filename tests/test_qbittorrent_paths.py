@@ -70,6 +70,62 @@ class QBittorrentPathTests(unittest.TestCase):
         SSHQBittorrentClient._start_task(session, "http://qb", "a" * 40)
         self.assertEqual([item[0] for item in session.posts], ["start", "resume"])
 
+    def test_new_task_relies_on_add_time_checking(self):
+        session = _Session([
+            None,
+            _row(progress=0.0, amount_left=123, state="checkingUP"),
+            _row(),
+        ])
+        client = SSHQBittorrentClient.__new__(SSHQBittorrentClient)
+
+        @contextmanager
+        def fake_session(profile):
+            yield session, "http://qb"
+
+        client._session = fake_session
+        profile = QBittorrentSeedProfile(
+            ssh_alias="media-vps", save_path="/downloads",
+            poll_interval=0.2, poll_timeout=2,
+        )
+        with TemporaryDirectory() as temporary, patch("bmlsub.release.qbittorrent.time.sleep"):
+            torrent = Path(temporary) / "release.torrent"
+            torrent.write_bytes(b"torrent")
+            identity = client.add_and_verify(
+                torrent_path=torrent, magnet_uri="magnet:?xt=urn:btih:" + "a" * 40,
+                expected_hash="a" * 40, expected_name="release.mkv",
+                expected_size=123, profile=profile,
+            )
+        self.assertEqual(identity.state, "stalledUP")
+        self.assertEqual([item[0] for item in session.posts], ["add"])
+
+    def test_existing_checking_task_is_only_polled(self):
+        session = _Session([
+            _row(progress=0.0, amount_left=123, state="checkingUP"),
+            _row(progress=0.5, amount_left=60, state="checkingUP"),
+            _row(),
+        ])
+        client = SSHQBittorrentClient.__new__(SSHQBittorrentClient)
+
+        @contextmanager
+        def fake_session(profile):
+            yield session, "http://qb"
+
+        client._session = fake_session
+        profile = QBittorrentSeedProfile(
+            ssh_alias="media-vps", save_path="/downloads",
+            poll_interval=0.2, poll_timeout=2,
+        )
+        with TemporaryDirectory() as temporary, patch("bmlsub.release.qbittorrent.time.sleep"):
+            torrent = Path(temporary) / "release.torrent"
+            torrent.write_bytes(b"torrent")
+            identity = client.add_and_verify(
+                torrent_path=torrent, magnet_uri="magnet:?xt=urn:btih:" + "a" * 40,
+                expected_hash="a" * 40, expected_name="release.mkv",
+                expected_size=123, profile=profile,
+            )
+        self.assertEqual(identity.state, "stalledUP")
+        self.assertEqual(session.posts, [])
+
     def test_legacy_host_path_is_replaced_without_deleting_files(self):
         session = _Session([
             _row(save_path="/data/dcapp/qb/downloads", progress=0.0,
@@ -102,8 +158,8 @@ class QBittorrentPathTests(unittest.TestCase):
         delete = next(item for item in session.posts if item[0] == "delete")
         self.assertEqual(delete[1]["deleteFiles"], "false")
         self.assertIn("add", [item[0] for item in session.posts])
-        self.assertIn("start", [item[0] for item in session.posts])
-        self.assertIn("recheck", [item[0] for item in session.posts])
+        self.assertNotIn("start", [item[0] for item in session.posts])
+        self.assertNotIn("recheck", [item[0] for item in session.posts])
 
     def test_unknown_save_path_blocks_without_delete(self):
         session = _Session([_row(save_path="/unexpected")])

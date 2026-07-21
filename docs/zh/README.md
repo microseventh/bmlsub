@@ -1,4 +1,4 @@
-# bmlsub 1.1.2 中文指南
+# bmlsub 1.1.3 中文指南
 
 `bmlsub` 是面向 macOS / Apple Silicon 的本地 Headless 媒体生产核心。公开入口是 `bmlsub` CLI、`Pipeline` Python API 和 `CredentialService`。本页描述本版本已经实现的能力，不包含规划中的功能。
 
@@ -30,7 +30,7 @@ python -m pip install git+https://github.com/microseventh/bmlsub.git
 | 状态与恢复 | Run、Stage、Artifact、ProductionRequest、SQLite、指纹、stale、事务化文件提交和安全复用 |
 | 工作站 | 番组配置继承、三阶段单集流程、真实 delivery 单步骤、非阻断字体诊断和发布批次快照 |
 
-虽然 `ProductionOperation` 模型中存在 `remux` 枚举，但当前 CLI 不接受该 operation，`normalize_profile()` 也不允许执行；因此 1.1.2 不提供独立 remux 功能。
+虽然 `ProductionOperation` 模型中存在 `remux` 枚举，但当前 CLI 不接受该 operation，`normalize_profile()` 也不允许执行；因此 1.1.3 不提供独立 remux 功能。
 
 ## 最小本地流程
 
