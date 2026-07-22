@@ -1573,6 +1573,14 @@ def _print_publish_plan(plan: dict[str, Any], *, verbose: bool = False) -> None:
     print(ui_text(f"  VPS 宿主机目录: {config.get('remote_dir')}", f"  VPS host directory: {config.get('remote_dir')}"), file=sys.stderr)
     print(ui_text(f"  qB 容器目录: {config.get('qb_save_path')}", f"  qB container directory: {config.get('qb_save_path')}"), file=sys.stderr)
     print(ui_text("  映射: 相同文件名通过 Docker volume 连接", "  Mapping: matching filenames are connected through a Docker volume"), file=sys.stderr)
+    anibt = plan.get("anibt", {})
+    if anibt.get("nyaa"):
+        print(ui_text(
+            f"  Anibt: 正式发布 + Nyaa 同步（分类 {anibt.get('nyaa_category')}，全部产品）",
+            f"  Anibt: formal publication + Nyaa syndication (category {anibt.get('nyaa_category')}, all products)",
+        ), file=sys.stderr)
+    else:
+        print(ui_text("  Anibt: 仅本站发布", "  Anibt: site publication only"), file=sys.stderr)
     print(ui_text("  顺序: R2 → VPS 拉取 → qB 做种 → Anibt 发布", "  Order: R2 → VPS pull → qB seeding → Anibt publication"), file=sys.stderr)
     print(ui_text("  凭据配置: ", "  Credential profiles: "), end="", file=sys.stderr)
     print(f"R2={config.get('r2_credential_profile')}, "
@@ -1590,6 +1598,17 @@ def _print_publish_plan(plan: dict[str, Any], *, verbose: bool = False) -> None:
             print(ui_text(f"      VPS 种子: {item.get('remote_torrent_path')}", f"      VPS Torrent: {item.get('remote_torrent_path')}"), file=sys.stderr)
     for item in plan.get("missing", []):
         print(ui_text(f"  缺失: {item}", f"  Missing: {item}"), file=sys.stderr)
+
+
+def _select_nyaa_syndication(*, unattended: bool) -> bool:
+    if unattended:
+        return True
+    if not sys.stdin.isatty():
+        return False
+    return _confirm_stderr(ui_text(
+        "Anibt 账户已获得 Nyaa 代发白名单，并将本次全部产品同步到 Nyaa",
+        "The Anibt account has Nyaa syndication access; publish all products to Nyaa too",
+    ))
 
 
 def _workstation_start_delivery(args: argparse.Namespace) -> dict[str, Any]:
@@ -1642,7 +1661,6 @@ def _workstation_start_delivery(args: argparse.Namespace) -> dict[str, Any]:
         inspection["episode_dir"], episode_id=inspection["episode_id"],
         publish_config=publish_config,
     )
-    _print_publish_plan(plan, verbose=args.verbose_plan)
     credential_status = _delivery_credential_status(publish_config)
     _print_delivery_credentials(credential_status)
     configure = args.configure or (credential_status["status"] != "succeeded" and not args.yes)
@@ -1669,7 +1687,6 @@ def _workstation_start_delivery(args: argparse.Namespace) -> dict[str, Any]:
             inspection["episode_dir"], episode_id=inspection["episode_id"],
             publish_config=publish_config,
         )
-        _print_publish_plan(plan, verbose=args.verbose_plan)
         if plan["status"] != "succeeded":
             return {"status": "needs_review", "inspection": inspection,
                     "setup": setup, "plan": plan,
@@ -1686,11 +1703,19 @@ def _workstation_start_delivery(args: argparse.Namespace) -> dict[str, Any]:
                     "credential_manifest": str(args.credential_manifest) if args.credential_manifest else None,
                 },
                 "next_action": "configure_delivery"}
+    publish_nyaa = _select_nyaa_syndication(unattended=args.yes)
+    plan = plan_publish(
+        inspection["episode_dir"], episode_id=inspection["episode_id"],
+        publish_config=publish_config, publish_nyaa=publish_nyaa,
+    )
+    _print_publish_plan(plan, verbose=args.verbose_plan)
     confirmed = args.yes or (args.execute and args.confirm_external_action)
     if not confirmed and sys.stdin.isatty():
         confirmed = _confirm_stderr(ui_text(
-            "按 R2 → VPS → qB → Anibt 顺序开始交付",
-            "Start delivery in R2 → VPS → qB → Anibt order",
+            "按 R2 → VPS → qB → Anibt 顺序开始交付"
+            + ("（同时代发 Nyaa）" if publish_nyaa else "（仅 Anibt）"),
+            "Start delivery in R2 → VPS → qB → Anibt order"
+            + (" with Nyaa syndication" if publish_nyaa else " without Nyaa syndication"),
         ))
     if not confirmed:
         return {
@@ -1711,7 +1736,7 @@ def _workstation_start_delivery(args: argparse.Namespace) -> dict[str, Any]:
     return run_publish(
         inspection["episode_dir"], episode_id=inspection["episode_id"],
         publish_config=publish_config, confirm_external_action=True, force=args.force,
-        confirm_item=confirm_item,
+        confirm_item=confirm_item, publish_nyaa=publish_nyaa,
     )
 
 

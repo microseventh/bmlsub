@@ -22,7 +22,7 @@ bmlsub workstation start delivery
 bmlsub workstation start delivery -y
 ```
 
-两种交付模式都按 R2 → VPS 拉取 → qB 做种 → Anibt 发布的顺序评估。交互模式逐产品确认，`-y/--yes` 自动接受确认。两者都保留 Stage 指纹、Artifact、receipt 和 live validator 检查，因此有效结果会复用。无人值守模式不是强制重跑；只有显式 `--force` 才要求重新执行 Stage。`--resume` 和 `--restart` 表达恢复意图，但都不会删除远端文件或撤回发布。
+两种交付模式都按 R2 → VPS 拉取 → qB 做种 → Anibt 发布的顺序评估。交互模式会询问 Anibt 账户是否已经获得 Nyaa 代发白名单；回答“是”会将三种产品全部通过同一次 multipart Torrent 请求同步到 Nyaa，分类固定为 `1_4`，回答“否”则保持仅发布 Anibt。`-y/--yes` 默认启用 Nyaa 同步并自动接受全部外部交付确认。未显式提供 `nyaaDescription` 时，由 Anibt 使用本站 `notes` 作为 Nyaa 说明。两种模式都保留 Stage 指纹、Artifact、receipt 和 live validator 检查，因此有效结果会复用。无人值守模式不是强制重跑；只有显式 `--force` 才要求重新执行 Stage。`--resume` 和 `--restart` 表达恢复意图，但都不会删除远端文件或撤回发布。
 
 执行前会检查 Credential Manifest、macOS Keychain 中的 R2/qB/Anibt payload、SSH identity、公开路径和本地输入。凭证缺失或无效时，无人值守模式返回 `needs_review`，不会要求或输出明文 Secret。
 

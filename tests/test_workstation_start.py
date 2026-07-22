@@ -316,6 +316,40 @@ class WorkstationStartTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 plan_rebuild(root, "01", "publish")
 
+    def test_anibt_profile_enables_nyaa_for_all_products(self):
+        from bmlsub.workstation.models import PublishConfig
+        from bmlsub.workstation.publish import _anibt_profile
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = PublishConfig(bgm_id=12345, notes="release notes")
+            expected = {
+                "mp4_chs": (["CHS", "JP"], "EMBEDDED", "MP4"),
+                "mp4_cht": (["CHT", "JP"], "EMBEDDED", "MP4"),
+                "mkv_hevc": (["CHS", "CHT", "JP"], "INTERNAL", "MKV"),
+            }
+            for product_key, (language, subtitle, format_name) in expected.items():
+                path = root / f"{product_key}.{format_name.lower()}"
+                path.write_bytes(b"release")
+                profile = _anibt_profile(
+                    config, "01", path, product_key, publish_nyaa=True,
+                )
+                self.assertEqual(profile["language"], language)
+                self.assertEqual(profile["subtitle"], subtitle)
+                self.assertEqual(profile["format"], format_name)
+                self.assertTrue(profile["nyaa"])
+                self.assertEqual(profile["nyaa_category"], "1_4")
+                self.assertFalse(profile["nyaa_complete"])
+                self.assertFalse(profile["nyaa_remake"])
+                self.assertIn("http://nyaa.tracker.wf:7777/announce", profile["trackers"])
+                self.assertNotIn("nyaa_description", profile)
+
+            plain_path = root / "plain.mkv"
+            plain_path.write_bytes(b"release")
+            plain = _anibt_profile(config, "01", plain_path, "mkv_hevc")
+            self.assertNotIn("nyaa", plain)
+            self.assertNotIn("trackers", plain)
+
     def test_publish_remote_paths_are_flat_but_r2_keys_are_nested(self):
         from bmlsub.workstation import PublishConfig, WorkstationConfig
         config = PublishConfig(

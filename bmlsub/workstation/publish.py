@@ -22,7 +22,8 @@ PRODUCT_KEYS = (
 
 
 def plan_publish(episode_dir: Path | str, *, episode_id: str | None = None,
-                 publish_config: PublishConfig | None = None) -> dict[str, Any]:
+                 publish_config: PublishConfig | None = None,
+                 publish_nyaa: bool = False) -> dict[str, Any]:
     root = Path(episode_dir).expanduser().resolve()
     context = discover_series_context(root)
     identifier = episode_id or context.episode_id
@@ -83,6 +84,8 @@ def plan_publish(episode_dir: Path | str, *, episode_id: str | None = None,
             "anibt": {
                 "format": "MKV" if key == "mkv_hevc" else "MP4",
                 "subtitle": "INTERNAL" if key == "mkv_hevc" else "EMBEDDED",
+                "nyaa": publish_nyaa,
+                "nyaa_category": "1_4" if publish_nyaa else None,
             },
         })
     return {
@@ -92,6 +95,7 @@ def plan_publish(episode_dir: Path | str, *, episode_id: str | None = None,
         "episode_dir": str(root), "episode_id": identifier,
         "missing": list(dict.fromkeys(missing)),
         "products": products, "torrents": torrents, "config": config.to_dict(),
+        "anibt": {"nyaa": publish_nyaa, "nyaa_category": "1_4" if publish_nyaa else None},
         "deliveries": deliveries,
         "external_actions": [
             "publish.upload_r2", "publish.pull_remote",
@@ -116,14 +120,17 @@ def _output_artifact_id(step: dict[str, Any], description: str) -> str:
 def run_publish(episode_dir: Path | str, *, episode_id: str | None = None,
                 publish_config: PublishConfig | None = None,
                 confirm_external_action: bool = False, force: bool = False,
-                confirm_item: Callable[[str, str], bool] | None = None) -> dict[str, Any]:
+                confirm_item: Callable[[str, str], bool] | None = None,
+                publish_nyaa: bool = False) -> dict[str, Any]:
     root = Path(episode_dir).expanduser().resolve()
     context = discover_series_context(root)
     identifier = episode_id or context.episode_id
     if identifier != context.episode_id:
         raise ValueError("episode_id does not match numeric episode directory")
     config = publish_config or WorkstationConfig.from_series_context(context).publish
-    plan = plan_publish(root, episode_id=identifier, publish_config=config)
+    plan = plan_publish(
+        root, episode_id=identifier, publish_config=config, publish_nyaa=publish_nyaa,
+    )
     if plan["status"] != "succeeded":
         payload = step_payload(
             workflow_id=plan["workflow_id"], phase="publish", step="publish.upload_r2",
@@ -272,7 +279,9 @@ def run_publish(episode_dir: Path | str, *, episode_id: str | None = None,
             return blocked
         published = workstation.pipeline.publish_anibt(
             workspace=root, episode_id=identifier, torrent_artifact_id=torrent_id,
-            profile=_anibt_profile(config, identifier, content.path, product_key),
+            profile=_anibt_profile(
+                config, identifier, content.path, product_key, publish_nyaa=publish_nyaa,
+            ),
             credential_manifest=config.credential_manifest,
             credential_profile=config.anibt_credential_profile, force=force,
         )
@@ -301,16 +310,29 @@ def run_publish_step(step: str, episode_dir: Path | str, **kwargs) -> dict[str, 
     return load_status(episode_dir, step)
 
 
-def _anibt_profile(config: PublishConfig, episode_id: str, path: Path, product_key: str) -> dict[str, Any]:
+def _anibt_profile(config: PublishConfig, episode_id: str, path: Path, product_key: str,
+                   *, publish_nyaa: bool = False) -> dict[str, Any]:
     values = {
         "mp4_chs": (["CHS", "JP"], "EMBEDDED", "MP4"),
         "mp4_cht": (["CHT", "JP"], "EMBEDDED", "MP4"),
         "mkv_hevc": (["CHS", "CHT", "JP"], "INTERNAL", "MKV"),
     }
     language, subtitle, format_name = values[product_key]
-    return {
+    profile = {
         "anime_id_type": "bgm", "anime_id": config.anime_id or str(config.bgm_id),
         "bgm_id": config.bgm_id, "title": path.stem, "episode_key": episode_id,
         "resolution": "1080p", "language": language, "subtitle": subtitle,
         "format": format_name, "file_size": path.stat().st_size, "notes": config.notes,
     }
+    if publish_nyaa:
+        profile.update({
+            "trackers": [
+                "https://tracker.anibt.net/announce",
+                "http://nyaa.tracker.wf:7777/announce",
+            ],
+            "nyaa": True,
+            "nyaa_category": "1_4",
+            "nyaa_complete": False,
+            "nyaa_remake": False,
+        })
+    return profile

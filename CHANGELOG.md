@@ -2,7 +2,16 @@
 
 All notable changes to `bmlsub` are recorded here.
 
-## 1.1.3 — 2026-07-21
+## 1.1.4 — 2026-07-22
+
+### Anibt and Nyaa publication
+
+- Add an interactive question for Anibt Nyaa syndication whitelist status during Workstation delivery.
+- Make `workstation start delivery -y` enable Nyaa syndication by default for all three products.
+- Publish CHS MP4, CHT MP4, and bilingual HEVC MKV through the multipart Torrent path with Nyaa category `1_4`.
+- Serialize explicit Nyaa completion/remake flags and reuse the existing release notes as the Nyaa description fallback.
+- Show the selected Nyaa publication mode in the delivery plan and add CLI, Workstation, and adapter regression coverage.
+
 
 ### qBittorrent seeding
 

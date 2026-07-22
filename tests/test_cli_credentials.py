@@ -4,8 +4,8 @@ import unittest
 from unittest.mock import patch
 
 from bmlsub.cli import (
-    _choose_or_create_profile, _prompt_default, _select_ui_language,
-    _print_publish_plan, build_parser,
+    _choose_or_create_profile, _prompt_default, _select_nyaa_syndication,
+    _select_ui_language, _print_publish_plan, build_parser,
 )
 from bmlsub.interactive import set_ui_language
 from contextlib import redirect_stderr
@@ -46,9 +46,26 @@ class CredentialWizardTests(unittest.TestCase):
         self.assertTrue(args.resume)
         self.assertTrue(args.verbose_plan)
 
+    def test_yes_mode_defaults_to_nyaa_without_prompting(self):
+        with patch("bmlsub.cli._confirm_stderr", side_effect=AssertionError("prompted")):
+            self.assertTrue(_select_nyaa_syndication(unattended=True))
+
+    def test_interactive_nyaa_selection_uses_whitelist_confirmation(self):
+        with patch("bmlsub.cli.sys.stdin.isatty", return_value=True), \
+             patch("bmlsub.cli._confirm_stderr", side_effect=(True, False)) as confirm:
+            self.assertTrue(_select_nyaa_syndication(unattended=False))
+            self.assertFalse(_select_nyaa_syndication(unattended=False))
+        self.assertIn("Nyaa", confirm.call_args_list[0].args[0])
+
+    def test_noninteractive_non_yes_mode_does_not_enable_nyaa(self):
+        with patch("bmlsub.cli.sys.stdin.isatty", return_value=False), \
+             patch("bmlsub.cli._confirm_stderr", side_effect=AssertionError("prompted")):
+            self.assertFalse(_select_nyaa_syndication(unattended=False))
+
     def test_default_publish_plan_is_concise(self):
         plan = {
             "episode_dir": "/series/01",
+            "anibt": {"nyaa": True, "nyaa_category": "1_4"},
             "config": {
                 "r2_bucket": "bml", "remote_dir": "/host/downloads",
                 "qb_save_path": "/downloads", "r2_credential_profile": "r2",
@@ -70,6 +87,8 @@ class CredentialWizardTests(unittest.TestCase):
             _print_publish_plan(plan)
         text = output.getvalue()
         self.assertIn("文件交付摘要", text)
+        self.assertIn("Nyaa", text)
+        self.assertIn("1_4", text)
         self.assertNotIn("/very/long/video.mkv", text)
         output = io.StringIO()
         with redirect_stderr(output):

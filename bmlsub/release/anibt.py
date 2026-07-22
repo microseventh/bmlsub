@@ -106,8 +106,8 @@ class RequestsAnibtClient:
                 if value:
                     fields.append((api_name, json.dumps(list(value), ensure_ascii=False)))
             elif isinstance(value, bool):
-                if value:
-                    fields.append((api_name, "true"))
+                if value or (profile.nyaa and attr_name in ("nyaa_complete", "nyaa_remake")):
+                    fields.append((api_name, "true" if value else "false"))
             elif value is not None and value != "":
                 fields.append((api_name, str(value)))
         return fields

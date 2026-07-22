@@ -1,4 +1,4 @@
-# bmlsub 1.1.3
+# bmlsub 1.1.4
 
 `bmlsub` is a macOS/Apple Silicon local headless media-production core. Its public entries are the `bmlsub` CLI, `Pipeline`, and `CredentialService`. This page describes the capabilities implemented in this release, not planned features.
 
@@ -32,9 +32,9 @@ bmlsub workstation start delivery -y
 
 `bmlsub workstation start` selects the episode and current phase through the interactive interface. It offers quick/full/no-transcription preprocess choices and local production scope without requiring ordinary users to compose low-level flags. The human translation handoff remains explicit and is never bypassed by fast mode.
 
-After local products and Torrents are complete, `bmlsub workstation start delivery` checks the Credential Manifest, macOS Keychain profiles, SSH alias, and host/container paths. It prints one concise summary and confirms each product in R2 → VPS pull → qB seed → Anibt order. Use `--configure` for first setup or credential repair and `--verbose-plan` only when complete file mappings are needed.
+After local products and Torrents are complete, `bmlsub workstation start delivery` checks the Credential Manifest, macOS Keychain profiles, SSH alias, and host/container paths. It asks whether the Anibt account has Nyaa syndication access; when confirmed, all three products are published to Nyaa through the same multipart Anibt request using category `1_4`. It then prints one concise summary and confirms each product in R2 → VPS pull → qB seed → Anibt order. Declining Nyaa still publishes to Anibt only. Use `--configure` for first setup or credential repair and `--verbose-plan` only when complete file mappings are needed.
 
-`bmlsub workstation start delivery -y` uses existing validated configuration and credentials and skips external-delivery confirmations. Valid Stage fingerprints and receipts are reused; `-y` does not imply `--force` and does not unconditionally repeat uploads or publications. Missing or invalid credentials stop with `needs_review` instead of requesting secrets. In a TTY, an episode can still be selected interactively; fully noninteractive automation over a series containing multiple episodes must identify the episode through the advanced CLI interface.
+`bmlsub workstation start delivery -y` uses existing validated configuration and credentials, defaults Nyaa syndication on for all products, and skips external-delivery confirmations. Valid Stage fingerprints and receipts are reused; `-y` does not imply `--force` and does not unconditionally repeat uploads or publications. Missing or invalid credentials stop with `needs_review` instead of requesting secrets. In a TTY, an episode can still be selected interactively; fully noninteractive automation over a series containing multiple episodes must identify the episode through the advanced CLI interface.
 
 English details: [Getting started](docs/getting-started.md) · 中文详情：[快速开始](docs/zh/getting-started.md)
 
