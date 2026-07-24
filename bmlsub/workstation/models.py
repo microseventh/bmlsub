@@ -26,6 +26,50 @@ class TrackSelection:
 
 
 @dataclass(frozen=True)
+class ReferenceTrackSelection:
+    """Select one or more reference subtitle tracks without conflating audio policy."""
+
+    policy: str = "all_matching"
+    language: str = "eng"
+    stream_indices: tuple[int, ...] = ()
+    resolved_stream_indices: tuple[int, ...] = ()
+    primary_stream_index: int | None = None
+
+    def __post_init__(self) -> None:
+        policy = self.policy.strip().lower().replace("-", "_")
+        if policy not in {"all_matching", "explicit", "unique"}:
+            raise ValueError("reference track policy must be all_matching, explicit, or unique")
+        language = self.language.strip().lower()
+        if not language:
+            raise ValueError("reference track language must not be empty")
+        requested = tuple(dict.fromkeys(int(item) for item in self.stream_indices))
+        resolved = tuple(dict.fromkeys(int(item) for item in self.resolved_stream_indices))
+        if any(item < 0 for item in (*requested, *resolved)):
+            raise ValueError("reference track stream indices must be non-negative")
+        if policy == "explicit" and not requested:
+            raise ValueError("explicit reference track selection requires stream indices")
+        if self.primary_stream_index is not None and self.primary_stream_index < 0:
+            raise ValueError("primary reference track stream index must be non-negative")
+        if resolved and self.primary_stream_index is not None and self.primary_stream_index not in resolved:
+            raise ValueError("primary reference track must be one of the resolved tracks")
+        if policy == "explicit" and resolved and not set(resolved).issubset(requested):
+            raise ValueError("resolved reference tracks must be explicitly requested")
+        object.__setattr__(self, "policy", policy)
+        object.__setattr__(self, "language", language)
+        object.__setattr__(self, "stream_indices", requested)
+        object.__setattr__(self, "resolved_stream_indices", resolved)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "policy": self.policy,
+            "language": self.language,
+            "stream_indices": list(self.stream_indices),
+            "resolved_stream_indices": list(self.resolved_stream_indices),
+            "primary_stream_index": self.primary_stream_index,
+        }
+
+
+@dataclass(frozen=True)
 class TranscriptionJob:
     name: str
     mode: str = "direct"
@@ -80,15 +124,33 @@ def transcription_jobs_for_mode(mode: str) -> tuple[TranscriptionJob, ...]:
 @dataclass(frozen=True)
 class PreprocessConfig:
     source_video: Path | str | None = None
-    reference_track: TrackSelection = field(default_factory=lambda: TrackSelection(language="eng"))
+    reference_tracks: ReferenceTrackSelection = field(default_factory=ReferenceTrackSelection)
     audio_track: TrackSelection = field(default_factory=lambda: TrackSelection(language="jpn"))
     whisper_jobs: Sequence[TranscriptionJob] = ()
+    transcription_policy: str = "none"
+
+    @property
+    def reference_track(self) -> TrackSelection:
+        """Compatibility view for consumers that still expect one reference track."""
+        index = self.reference_tracks.primary_stream_index
+        if index is None and len(self.reference_tracks.stream_indices) == 1:
+            index = self.reference_tracks.stream_indices[0]
+        return TrackSelection(stream_index=index, language=self.reference_tracks.language)
+
+    def __post_init__(self) -> None:
+        policy = self.transcription_policy.strip().lower()
+        if policy not in {"quick", "full", "none", "custom"}:
+            raise ValueError("transcription policy must be quick, full, none, or custom")
+        object.__setattr__(self, "transcription_policy", policy)
+        object.__setattr__(self, "whisper_jobs", tuple(self.whisper_jobs))
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "source_video": str(self.source_video) if self.source_video else None,
             "reference_track": self.reference_track.to_dict(),
+            "reference_tracks": self.reference_tracks.to_dict(),
             "audio_track": self.audio_track.to_dict(),
+            "transcription_policy": self.transcription_policy,
             "whisper_jobs": [item.to_dict() for item in self.whisper_jobs],
         }
 

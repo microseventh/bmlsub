@@ -152,7 +152,7 @@ bmlsub workstation start delivery \
 
 配置完成仍不会自动发布，而是回到简洁摘要和交付确认。交互式外部交付按全部 R2 → 全部 VPS 拉取 → 全部 qB → 全部 Anibt 的顺序逐产品确认；`-y` 自动接受这些确认。每类 Profile 都可在 `--configure` 向导中选择复用 available、修复 unavailable 或新建。R2 新建/修复会询问 Account ID、Access Key ID 和隐藏输入的 Secret Access Key，并直接写入 macOS Keychain。`-y` 保留 Stage 指纹和 receipt 复用，不等于 `--force`；凭证缺失时返回 `needs_review`。自定义 Credential Manifest 可用 `--credential-manifest PATH`，该运行时路径不会写入 `series.json`。
 
-预处理执行前会选择转录策略：`quick` 只执行一次 direct；`full`（默认）分别登记 direct 完整转录和 chunked 切片转录；`none` 不调用 Whisper，但仍生成归档音频和转录 WAV。参数模式使用 `--transcription quick|full|none`。
+预处理执行前会选择转录策略：`quick` 使用相同 Whisper 模型执行一次 direct 整段转录（较快，不代表更小模型）；`full`（默认）分别登记 direct 完整转录和 chunked 切片转录；`none` 不调用 Whisper，但仍生成归档音频和转录 WAV。参数模式使用 `--transcription quick|full|none`。参考字幕默认使用 `--reference-policy all-matching`，提取全部匹配语言且可提取的文本字幕轨；多轨文件以 `.en.s<流索引>` 区分，并为 primary/default 轨额外维护兼容的 `.en` 文件。可使用重复的 `--reference-stream-index INDEX` 配合 `--reference-policy explicit` 显式选择一个或多个轨。
 ## `workstation rebuild`
 
 ```bash
@@ -178,7 +178,7 @@ bmlsub workstation series retry-traditionalization --series-root PATH
 
 ## `workstation preprocess | delivery | publish | status`
 
-- `workstation preprocess --workspace EPISODE [--episode-id ID]`：只在顶层源视频唯一时自动选择，提取一个英语参考字幕、日语音频，并可执行配置的 Whisper job。
+- `workstation preprocess --workspace EPISODE [--episode-id ID]`：只在顶层源视频唯一时自动选择；默认提取全部英语文本参考字幕轨，为每轨生成带 stream index 的工作文件并为 primary 轨保留兼容别名；随后提取日语音频，并可执行配置的 Whisper job。
 - `delivery`：默认从直接父级 `bgminfo/series.json` 继承制作组、番名和 Production Profile；显式 CLI 参数仅作为本集覆盖。完整模式验证正式 `<集数>.CHS&JPN.ass` 和顶层 Aegisub 字体包，并检查可选的正式 `<集数>.CHT&JPN.ass`（文件名大小写不敏感）。已有繁体字幕时直接登记并用于 `h264-cht` 和 MKV 繁体字幕轨；没有时才通过配置的台湾繁化服务从简体字幕生成。随后执行非阻断字体诊断，生成所选视频和同完整文件名 Torrent。也可用 `--delivery-scope mkv|mp4|custom` 只生成所选产品；`--delivery-torrents none` 跳过 Torrent。局部完成返回 `partial`，不会伪记为完整本地生产。
 - `delivery --step STEP`：真实单步骤执行，choices 为 `validate_subtitles_fonts`、`encode_hevc`、`encode_hardsub_chs`、`encode_hardsub_cht`、`mux_subtitles`、`create_torrents`；`all`/`delivery` 表示完整流程。单步骤只消费 `manifest.json` 已登记的上游 Artifact，不会隐式先跑完整 delivery；缺少依赖时失败。
 - `publish --publish-config-json JSON [--confirm-external-action]`：未确认时返回 `awaiting_confirmation`，不调用 R2、SSH、qB 或 Anibt。

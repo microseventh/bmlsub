@@ -26,6 +26,8 @@ bmlsub workstation start delivery -y
 
 执行前会检查 Credential Manifest、macOS Keychain 中的 R2/qB/Anibt payload、SSH identity、公开路径和本地输入。凭证缺失或无效时，无人值守模式返回 `needs_review`，不会要求或输出明文 Secret。
 
+从 1.1.5 起，本地发布准备状态只按当前 preprocess plan 计算，不再把历史 quick/full/none 步骤混为一体。所选策略的 expected steps 必须完成后才进入普通人工交接。Manifest 登记的全部英语参考工作副本都会从正式 CHS 字幕发现中排除，因此 `.en.s<流索引>.ass` 不会被误判为发布输入。Manifest v1 仍可读取，并在下一次状态更新时写为 v2。这些本地状态改动不改变下述 Anibt/Nyaa 发布契约。
+
 ## TorrentProfile
 
 ```json

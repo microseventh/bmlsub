@@ -1,4 +1,4 @@
-# bmlsub 1.1.4
+# bmlsub 1.1.5
 
 `bmlsub` is a macOS/Apple Silicon local headless media-production core. Its public entries are the `bmlsub` CLI, `Pipeline`, and `CredentialService`. This page describes the capabilities implemented in this release, not planned features.
 
@@ -30,7 +30,7 @@ bmlsub workstation start delivery
 bmlsub workstation start delivery -y
 ```
 
-`bmlsub workstation start` selects the episode and current phase through the interactive interface. It offers quick/full/no-transcription preprocess choices and local production scope without requiring ordinary users to compose low-level flags. The human translation handoff remains explicit and is never bypassed by fast mode.
+`bmlsub workstation start` selects the episode and current phase through the interactive interface. During preprocess it extracts every matching supported English text-subtitle track, keeps stream-indexed working copies plus a primary/default compatibility copy, and offers quick/full/no-transcription choices. Quick means one direct full-length transcription with the same Whisper model. Current-plan status isolates quick/full/none from historical steps, and incomplete preprocessing resumes before the human translation handoff. Local production scope remains selectable without requiring ordinary users to compose low-level flags.
 
 After local products and Torrents are complete, `bmlsub workstation start delivery` checks the Credential Manifest, macOS Keychain profiles, SSH alias, and host/container paths. It asks whether the Anibt account has Nyaa syndication access; when confirmed, all three products are published to Nyaa through the same multipart Anibt request using category `1_4`. It then prints one concise summary and confirms each product in R2 → VPS pull → qB seed → Anibt order. Declining Nyaa still publishes to Anibt only. Use `--configure` for first setup or credential repair and `--verbose-plan` only when complete file mappings are needed.
 
@@ -57,7 +57,7 @@ For episode production, Workstation requires a formal `<episode>.CHS&JPN.ass` an
 - three-phase episode workstation orchestration with direct-parent series/Profile inheritance, real single-step delivery, `workstation/state/state.sqlite3`, readable step/Artifact/credential/batch snapshots, non-blocking font diagnostics, parallel video products, torrents, and explicitly confirmed publication;
 - Run, Stage, Artifact, ProductionRequest, SQLite, fingerprints, stale detection, transactional output, and safe reuse.
 
-A `remux` enum exists in the model, but the CLI and executable Profile contract reject it; independent remux is not a 1.1.3 feature.
+A `remux` enum exists in the model, but the CLI and executable Profile contract reject it; independent remux is not a 1.1.5 feature.
 
 ## Current boundaries
 

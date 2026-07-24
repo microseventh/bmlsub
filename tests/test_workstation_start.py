@@ -11,7 +11,7 @@ from bmlsub.workstation import (
     ensure_traditional_series_names, inspect_episode_stage, inspect_series_workspace,
     plan_delivery_execution, plan_rebuild, resolve_series_root, run_rebuild,
     transcription_jobs_for_mode, update_series_publish_config,
-    write_series_metadata_template,
+    write_series_metadata_template, ReferenceTrackSelection,
 )
 
 
@@ -242,6 +242,100 @@ class WorkstationStartTests(unittest.TestCase):
         self.assertEqual(transcription_jobs_for_mode("none"), ())
         with self.assertRaises(ValueError):
             transcription_jobs_for_mode("other")
+
+    def test_reference_track_selection_policy_and_cli(self):
+        from bmlsub.cli import build_parser
+        from bmlsub.workstation.preprocess import _select_reference_tracks
+
+        tracks = [
+            {"index": 2, "kind": "subtitle", "codec_name": "subrip",
+             "language": "eng", "is_default": True, "is_forced": False},
+            {"index": 3, "kind": "subtitle", "codec_name": "subrip",
+             "language": "eng", "is_default": False, "is_forced": False},
+        ]
+        selected, primary, error, diagnostics = _select_reference_tracks(
+            tracks, "eng", (), "all_matching",
+        )
+        self.assertEqual([item["index"] for item in selected], [2, 3])
+        self.assertEqual(primary, 2)
+        self.assertIsNone(error)
+        self.assertEqual(diagnostics, [])
+
+        selected, primary, error, _ = _select_reference_tracks(
+            tracks, "eng", (3,), "explicit",
+        )
+        self.assertEqual([item["index"] for item in selected], [3])
+        self.assertEqual(primary, 3)
+        self.assertIsNone(error)
+
+        _selected, _primary, error, _ = _select_reference_tracks(
+            tracks, "eng", (), "unique",
+        )
+        self.assertEqual(error["code"], "track_selection_ambiguous")
+
+        configured = ReferenceTrackSelection(
+            policy="all-matching", language="ENG",
+            resolved_stream_indices=(2, 3), primary_stream_index=2,
+        )
+        self.assertEqual(configured.policy, "all_matching")
+        self.assertEqual(configured.language, "eng")
+
+        args = build_parser().parse_args([
+            "workstation", "preprocess", "--reference-policy", "explicit",
+            "--reference-stream-index", "3", "--reference-stream-index", "2",
+        ])
+        self.assertEqual(args.reference_stream_index, [3, 2])
+        self.assertEqual(args.reference_policy, "explicit")
+
+    def test_current_preprocess_plan_ignores_historical_failures(self):
+        from bmlsub.workstation.state import refresh_summary, write_phase_plan
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "workstation" / "state"
+            steps = state / "steps"
+            steps.mkdir(parents=True)
+            (steps / "preprocess.transcribe.chunked.json").write_text(json.dumps({
+                "step": "preprocess.transcribe.chunked", "status": "failed",
+            }), encoding="utf-8")
+            (steps / "preprocess.inspect_video.json").write_text(json.dumps({
+                "step": "preprocess.inspect_video", "status": "succeeded",
+            }), encoding="utf-8")
+            write_phase_plan(
+                root, phase="preprocess", policy="none",
+                expected_steps=["preprocess.inspect_video"], workflow_id="episode-01",
+            )
+            summary = refresh_summary(root)
+            self.assertEqual(summary["preprocess"]["status"], "succeeded")
+            self.assertEqual(summary["preprocess"]["policy"], "none")
+            self.assertNotIn(
+                "preprocess.transcribe.chunked", summary["preprocess"]["steps"],
+            )
+
+    def test_incomplete_registered_preprocess_takes_priority_over_reference_file(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.make_series(root)
+            episode = root / "01"
+            (episode / "01.mkv").write_bytes(b"video")
+            (episode / "01.en.srt").write_text("reference", encoding="utf-8")
+            state = episode / "workstation" / "state"
+            state.mkdir(parents=True)
+            (state / "manifest.json").write_text(json.dumps({
+                "schema_version": "workstation-manifest-v2",
+                "source": {"video_artifact_id": "video"},
+                "preprocess": {}, "subtitles": {},
+                "fonts": {"artifact_ids": []}, "products": {},
+                "torrents": {}, "publish": {},
+            }), encoding="utf-8")
+            (state / "summary.json").write_text(json.dumps({
+                "schema_version": "workstation-summary-v2",
+                "preprocess": {"status": "failed", "steps": {}},
+            }), encoding="utf-8")
+            inspected = inspect_episode_stage(root, "01")
+            self.assertEqual(inspected["detected_phase"], "preprocess")
+            self.assertEqual(inspected["recommended_action"], "run_preprocess")
+            self.assertTrue(inspected["executable"])
 
     def test_delivery_selection_scopes_and_dependencies(self):
         full = DeliverySelection.for_scope("full")

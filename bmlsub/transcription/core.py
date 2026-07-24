@@ -154,7 +154,11 @@ def run_transcription(*, workspace: Path | str, episode_id: str,
     modes = ((TranscriptionMode.DIRECT, TranscriptionMode.CHUNKED)
              if config.mode is TranscriptionMode.BOTH else (config.mode,))
     directory = _output_directory(root, episode_id, output_dir)
-    targets = tuple(_output_path(directory, episode_id, mode, config.model) for mode in modes)
+    targets = tuple(_output_path(
+        directory, episode_id, mode, config.model,
+        model_revision=config.model_revision, language=config.language,
+        decoding=config.decoding,
+    ) for mode in modes)
     chunk_plan = (_chunk_plan(duration_seconds, config)
                   if TranscriptionMode.CHUNKED in modes else ())
     chunk_directory = _chunk_output_directory(root, config.model)
@@ -506,10 +510,17 @@ def _output_directory(workspace: Path, episode_id: str,
 
 
 def _output_path(directory: Path, episode_id: str, mode: TranscriptionMode,
-                 model: str) -> Path:
+                 model: str, *, model_revision: str = "main",
+                 language: str = "ja", decoding: Mapping[str, Any] | None = None) -> Path:
     model_name = model.rstrip("/").split("/")[-1]
     safe_model = "".join(char if char.isalnum() or char in "._-" else "-" for char in model_name)
-    return directory / f"{episode_id}.{mode.value}.{safe_model}.transcript.json"
+    identity = fingerprint_parameters({
+        "model": model, "model_revision": model_revision,
+        "language": language, "decoding": dict(decoding or {}),
+    })[:8]
+    return directory / (
+        f"{episode_id}.{mode.value}.{safe_model}.{language}.{identity}.transcript.json"
+    )
 
 
 def _chunk_output_directory(workspace: Path, model: str) -> Path:

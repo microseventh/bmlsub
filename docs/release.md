@@ -26,6 +26,8 @@ Both delivery modes evaluate actions in R2 → VPS pull → qB seed → Anibt or
 
 Before execution, Workstation validates the Credential Manifest, macOS Keychain payloads for R2/qB/Anibt, SSH identity, public paths, and local inputs. Missing or invalid credentials stop unattended mode with `needs_review`; secrets are never requested or emitted noninteractively.
 
+Since 1.1.5, local publication readiness uses the current preprocess plan rather than the union of historical quick/full/none steps. Preprocess must complete the expected steps for the selected policy before ordinary human handoff. Every registered English reference working copy is excluded from formal CHS subtitle discovery, so `.en.s<stream-index>.ass` files cannot be mistaken for release inputs. Manifest v1 state remains readable and is written as v2 on the next state update. These local-state changes do not alter the Anibt/Nyaa publication contract described below.
+
 TorrentProfile accepts hybrid/v1, supported fixed piece lengths, private/comment/created_by, tracker URL, and timeout. libtorrent is the only backend.
 
 R2UploadProfile requires bucket and object_key and controls content type, private/public access, public HTTPS base, multipart sizes, and concurrency. R2 credentials use profile alias or compatibility env/secure file.

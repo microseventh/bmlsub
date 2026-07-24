@@ -139,8 +139,16 @@ def plan_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
         raise ValueError("episode_id does not match numeric episode directory")
     release_names = release_names or WorkstationConfig.from_series_context(context).delivery.names
     manifest = load_manifest(root)
-    reference = manifest.get("preprocess", {}).get("reference_delivery_path")
-    references = (Path(reference),) if reference else ()
+    preprocess = manifest.get("preprocess", {})
+    reference_records = preprocess.get("reference_subtitles", [])
+    references = tuple(
+        Path(item["delivery_path"])
+        for item in reference_records
+        if isinstance(item, dict) and item.get("delivery_path")
+    )
+    if not references:
+        reference = preprocess.get("reference_delivery_path")
+        references = (Path(reference),) if reference else ()
     video, video_error = discover_source_video(root)
     subtitle, subtitle_error = discover_production_subtitle(root, identifier, production_subtitle, references)
     traditional_subtitle, traditional_error = discover_traditional_subtitle(root, identifier)

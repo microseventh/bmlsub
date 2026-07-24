@@ -36,6 +36,7 @@ from .media import (
     run_attachment_extraction,
     run_audio_extraction,
     run_subtitle_extraction,
+    run_subtitle_extractions,
     run_video_registration,
 )
 from .production.models import ProductionOperation
@@ -361,6 +362,25 @@ class Pipeline:
             video_artifact_id=video_artifact_id, purpose=purpose,
             stream_index=stream_index, language=language,
             output_dir=output_dir, ffmpeg=ffmpeg, ffprobe=ffprobe,
+            process_timeout=process_timeout, probe_timeout=probe_timeout,
+            store=self.store, state_dir=self.state_dir, force=force,
+        ).to_dict()
+
+    def extract_subtitle_tracks(self, *, workspace: Path | str, episode_id: str,
+                                stream_indices: tuple[int, ...] | list[int],
+                                video_artifact_id: str | None = None,
+                                purpose: str | None = None,
+                                output_dir: Path | str | None = None,
+                                ffmpeg: Path | str = "ffmpeg",
+                                ffprobe: Path | str = "ffprobe",
+                                process_timeout: float = 300.0,
+                                probe_timeout: float = 30.0,
+                                force: bool = False) -> dict[str, Any]:
+        return run_subtitle_extractions(
+            workspace=workspace, episode_id=episode_id,
+            video_artifact_id=video_artifact_id, purpose=purpose,
+            stream_indices=stream_indices, output_dir=output_dir,
+            ffmpeg=ffmpeg, ffprobe=ffprobe,
             process_timeout=process_timeout, probe_timeout=probe_timeout,
             store=self.store, state_dir=self.state_dir, force=force,
         ).to_dict()

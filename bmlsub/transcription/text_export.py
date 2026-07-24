@@ -16,10 +16,16 @@ from ..state.sqlite_store import SQLiteJobStore
 EXPORT_VERSION = "transcript-text-export-v1"
 
 
-def transcript_text_path(workspace: Path | str, episode_id: str, mode: str, model: str) -> Path:
+def transcript_text_path(workspace: Path | str, episode_id: str, mode: str, model: str,
+                         job_name: str | None = None,
+                         model_revision: str = "main", language: str = "ja") -> Path:
     root = Path(workspace).expanduser().resolve()
     safe = "".join(char if char.isalnum() or char in "._-" else "-" for char in model.rstrip("/").split("/")[-1])
-    return root / f"{episode_id}.{mode}.{safe}.txt"
+    identity = fingerprint_parameters({
+        "job_name": job_name or mode, "mode": mode, "model": model,
+        "model_revision": model_revision, "language": language,
+    })[:8]
+    return root / f"{episode_id}.{job_name or mode}.{safe}.{language}.{identity}.txt"
 
 
 def _lines_from_payload(payload: dict[str, Any]) -> list[str]:
@@ -38,6 +44,8 @@ def _lines_from_payload(payload: dict[str, Any]) -> list[str]:
 
 def run_transcript_text_export(*, workspace: Path | str, episode_id: str,
                                transcript_artifact_id: str, mode: str, model: str,
+                               job_name: str | None = None,
+                               model_revision: str = "main", language: str = "ja",
                                store: SQLiteJobStore | None = None,
                                state_dir: Path | str | None = None,
                                force: bool = False) -> dict[str, Any]:
@@ -49,9 +57,16 @@ def run_transcript_text_export(*, workspace: Path | str, episode_id: str,
         raise ValueError("transcript artifact is not current")
     payload = json.loads(source.path.read_text(encoding="utf-8"))
     lines = _lines_from_payload(payload)
-    target = transcript_text_path(root, episode_id, mode, model)
+    target = transcript_text_path(
+        root, episode_id, mode, model, job_name,
+        model_revision=model_revision, language=language,
+    )
     input_fp = source.content_hash or ""
-    parameter_fp = fingerprint_parameters({"target": str(target.relative_to(root)), "mode": mode, "model": model, "export": EXPORT_VERSION})
+    parameter_fp = fingerprint_parameters({
+        "target": str(target.relative_to(root)), "job_name": job_name or mode,
+        "mode": mode, "model": model, "model_revision": model_revision,
+        "language": language, "export": EXPORT_VERSION,
+    })
     tool_fp = fingerprint_tools({"export": EXPORT_VERSION})
 
     def adapter(context: StageContext) -> StageOutcome:
@@ -59,10 +74,14 @@ def run_transcript_text_export(*, workspace: Path | str, episode_id: str,
             target, workspace=root, run_id=context.run_id, stage_id=context.stage_id,
             episode_id=episode_id, artifact_type=f"generated.transcript.text.{mode}",
             source_fingerprint=input_fp, parameter_fingerprint=parameter_fp,
-            metadata={"source_transcript_artifact_id": source.artifact_id, "mode": mode,
-                      "model": model, "export_version": EXPORT_VERSION, "line_count": len(lines)},
+            metadata={"source_transcript_artifact_id": source.artifact_id,
+                      "job_name": job_name or mode, "mode": mode, "model": model,
+                      "model_revision": model_revision, "language": language,
+                      "export_version": EXPORT_VERSION, "line_count": len(lines)},
         ).write(
-            lambda path: path.write_text("\n".join(lines) + "\n", encoding="utf-8"),
+            lambda path: path.write_text(
+                ("\n".join(lines) + "\n") if lines else "", encoding="utf-8"
+            ),
             lambda path: _validate_text(path, lines),
         )
         return StageOutcome(artifacts=(written.artifact,), diagnostics=(Diagnostic(
@@ -71,7 +90,8 @@ def run_transcript_text_export(*, workspace: Path | str, episode_id: str,
         ),))
 
     result = StageRunner(ledger).run(
-        workspace=root, command_name="transcribe.export-text", stage_name=f"transcription.export_text.{mode}",
+        workspace=root, command_name="transcribe.export-text",
+        stage_name=f"transcription.export_text.{job_name or mode}",
         episode_id=episode_id, input_fingerprint=input_fp, parameter_fingerprint=parameter_fp,
         tool_fingerprint=tool_fp, adapter=adapter,
         inputs=(StageInputBinding(source.artifact_id, "transcript", 0),), force=force,

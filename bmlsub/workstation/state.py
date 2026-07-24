@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Mapping
+import hashlib
 import json
 import os
 import tempfile
@@ -14,8 +15,9 @@ from .common import ensure_directories
 
 
 STEP_SCHEMA_VERSION = "workstation-step-v1"
-MANIFEST_SCHEMA_VERSION = "workstation-manifest-v1"
-SUMMARY_SCHEMA_VERSION = "workstation-summary-v1"
+MANIFEST_SCHEMA_VERSION = "workstation-manifest-v2"
+SUMMARY_SCHEMA_VERSION = "workstation-summary-v2"
+PLAN_SCHEMA_VERSION = "workstation-phase-plan-v1"
 
 
 def read_json(path: Path | str, default: Any = None) -> Any:
@@ -193,12 +195,58 @@ def manifest_path(workspace: Path | str) -> Path:
     return Path(workspace).expanduser().resolve() / "workstation" / "state" / "manifest.json"
 
 
-def load_manifest(workspace: Path | str) -> dict[str, Any]:
-    return read_json(manifest_path(workspace), {
+def _default_manifest() -> dict[str, Any]:
+    return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
-        "source": {}, "preprocess": {}, "subtitles": {}, "fonts": {"artifact_ids": []},
-        "products": {}, "torrents": {}, "publish": {},
-    })
+        "source": {}, "preprocess": {}, "subtitles": {},
+        "fonts": {"artifact_ids": []}, "products": {}, "torrents": {},
+        "publish": {},
+    }
+
+
+def _normalize_manifest(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    normalized = _default_manifest()
+    if isinstance(payload, Mapping):
+        for key, value in payload.items():
+            normalized[key] = dict(value) if isinstance(value, Mapping) else value
+    preprocess = normalized.setdefault("preprocess", {})
+    references = preprocess.get("reference_subtitles")
+    if not isinstance(references, list):
+        legacy_id = preprocess.get("reference_subtitle_artifact_id")
+        legacy_path = preprocess.get("reference_delivery_path")
+        references = ([{
+            "stream_index": None,
+            "language": "eng",
+            "artifact_id": legacy_id,
+            "delivery_path": legacy_path,
+            "legacy": True,
+        }] if legacy_id or legacy_path else [])
+        preprocess["reference_subtitles"] = references
+    if references and not isinstance(preprocess.get("reference_selection"), Mapping):
+        indices = [item.get("stream_index") for item in references
+                   if isinstance(item, Mapping) and isinstance(item.get("stream_index"), int)]
+        preprocess["reference_selection"] = {
+            "policy": "legacy_single" if len(references) == 1 else "all_matching",
+            "requested_language": "eng",
+            "resolved_stream_indices": indices,
+            "primary_stream_index": indices[0] if len(indices) == 1 else None,
+            "complete": True,
+        }
+    normalized["schema_version"] = MANIFEST_SCHEMA_VERSION
+    return normalized
+
+
+def load_manifest(workspace: Path | str) -> dict[str, Any]:
+    return _normalize_manifest(read_json(manifest_path(workspace), None))
+
+
+def _merge_mapping(target: dict[str, Any], values: Mapping[str, Any]) -> None:
+    for key, value in values.items():
+        current = target.get(key)
+        if isinstance(current, dict) and isinstance(value, Mapping):
+            _merge_mapping(current, value)
+        else:
+            target[key] = dict(value) if isinstance(value, Mapping) else value
 
 
 def update_manifest(workspace: Path | str, **sections: Mapping[str, Any]) -> dict[str, Any]:
@@ -206,8 +254,32 @@ def update_manifest(workspace: Path | str, **sections: Mapping[str, Any]) -> dic
     payload["schema_version"] = MANIFEST_SCHEMA_VERSION
     for name, values in sections.items():
         current = payload.setdefault(name, {})
-        current.update(values)
+        _merge_mapping(current, values)
     atomic_write_json(manifest_path(workspace), payload)
+    return payload
+
+
+def phase_plan_path(workspace: Path | str, phase: str) -> Path:
+    return (Path(workspace).expanduser().resolve() / "workstation" / "state"
+            / f"{phase}-plan.json")
+
+
+def write_phase_plan(workspace: Path | str, *, phase: str, policy: str,
+                     expected_steps: list[str] | tuple[str, ...],
+                     workflow_id: str) -> dict[str, Any]:
+    steps = list(dict.fromkeys(expected_steps))
+    payload = {
+        "schema_version": PLAN_SCHEMA_VERSION,
+        "workflow_id": workflow_id,
+        "phase": phase,
+        "policy": policy,
+        "expected_steps": steps,
+        "plan_id": hashlib.sha256(
+            json.dumps({"phase": phase, "policy": policy, "steps": steps},
+                       ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+    }
+    atomic_write_json(phase_plan_path(workspace, phase), payload)
     return payload
 
 
@@ -218,13 +290,28 @@ def refresh_summary(workspace: Path | str) -> dict[str, Any]:
     for path in sorted(step_dir.glob("*.json")) if step_dir.is_dir() else ():
         payload = read_json(path, {})
         steps[payload.get("step", path.stem)] = payload.get("status", "pending")
-    phase_steps = {
-        phase: {name: value for name, value in steps.items() if name.startswith(f"{phase}.")}
-        for phase in ("preprocess", "translation", "delivery", "publish")
-    }
+    phase_steps = {}
+    phase_plans = {}
+    for phase in ("preprocess", "translation", "delivery", "publish"):
+        plan = read_json(phase_plan_path(root, phase), {})
+        expected = plan.get("expected_steps") if isinstance(plan, Mapping) else None
+        if isinstance(expected, list):
+            selected = {name: steps.get(name, "pending") for name in expected}
+            phase_plans[phase] = plan
+        else:
+            selected = {name: value for name, value in steps.items()
+                        if name.startswith(f"{phase}.")}
+        phase_steps[phase] = selected
+    preprocess = _phase_status(phase_steps["preprocess"])
+    if phase_plans.get("preprocess"):
+        preprocess.update({
+            "plan_id": phase_plans["preprocess"].get("plan_id"),
+            "policy": phase_plans["preprocess"].get("policy"),
+            "expected_steps": phase_plans["preprocess"].get("expected_steps", []),
+        })
     summary = {
         "schema_version": SUMMARY_SCHEMA_VERSION,
-        "preprocess": _phase_status(phase_steps["preprocess"]),
+        "preprocess": preprocess,
         "translation": {
             "status": _phase_status(phase_steps["translation"])["status"],
             "completed_by_user": True,

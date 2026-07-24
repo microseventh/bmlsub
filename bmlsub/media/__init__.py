@@ -7,10 +7,12 @@ from .extraction import (
     AUDIO_STAGE,
     SUBTITLE_PROFILE_VERSION,
     SUBTITLE_STAGE,
+    SUBTITLES_STAGE,
     list_media_tracks,
     run_attachment_extraction,
     run_audio_extraction,
     run_subtitle_extraction,
+    run_subtitle_extractions,
 )
 from .models import MediaStreamSummary, MediaSummary, VideoPurpose
 from .probe import FFprobeClient
@@ -44,11 +46,13 @@ __all__ = [
     "AttachmentCandidate", "AudioOutputMode", "FFprobeClient",
     "MEDIA_VALIDATOR_VERSION", "MediaStreamSummary", "MediaSummary",
     "OUTPUT_NAMING_VERSION", "SUBTITLE_PROFILE_VERSION", "SUBTITLE_STAGE",
+    "SUBTITLES_STAGE",
     "TRACK_SELECTION_VERSION", "TrackCandidate", "TrackKind",
     "VIDEO_PROBE_SCHEMA_VERSION", "VIDEO_REGISTRATION_STAGE", "VideoPurpose",
     "VideoRegistrationOptions", "attachment_candidates_from_artifact",
     "candidates_from_artifact", "get_current_artifact", "list_current_artifacts",
     "list_media_tracks", "resolve_video", "run_attachment_extraction",
-    "run_audio_extraction", "run_subtitle_extraction", "run_video_registration",
+    "run_audio_extraction", "run_subtitle_extraction", "run_subtitle_extractions",
+    "run_video_registration",
     "select_track",
 ]

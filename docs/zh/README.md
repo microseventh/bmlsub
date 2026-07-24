@@ -1,4 +1,4 @@
-# bmlsub 1.1.3 中文指南
+# bmlsub 1.1.5 中文指南
 
 `bmlsub` 是面向 macOS / Apple Silicon 的本地 Headless 媒体生产核心。公开入口是 `bmlsub` CLI、`Pipeline` Python API 和 `CredentialService`。本页描述本版本已经实现的能力，不包含规划中的功能。
 
@@ -21,8 +21,8 @@ python -m pip install git+https://github.com/microseventh/bmlsub.git
 |---|---|
 | 字幕兼容入口 | 校验 CHS/CHT ASS，ASS 感知简转繁，显式高风险整文件模式 |
 | 素材 | 视频、ASS/SRT、字体、章节、附件登记；查询、候选匹配和明确确认 |
-| 媒体 | ffprobe 轨道清单；归档/转录音频、文本字幕轨和全部附件提取 |
-| 转录 | MLX Whisper `direct`、`chunked`、`both` |
+| 媒体 | ffprobe 轨道清单；同语言文本参考字幕批量提取与 primary 兼容副本；归档/转录音频和全部附件提取 |
+| 转录 | MLX Whisper `direct`、`chunked`、`both`；quick/full/none 当前计划隔离和失败恢复 |
 | ASS | `ass-analysis-v4` 分析、显式规范化、字体需求、OP/ED/IN 折叠和标准 ASS 重建 |
 | ProductionRequest | `encode + hevc-10bit`、`hardsub + h264-chs/h264-cht`、`mux_subtitle + mkv-subtitle` |
 | Release | libtorrent torrent、R2 上传、SSH+rclone 拉取、qBittorrent 做种、Anibt preview/正式发布 |
@@ -30,7 +30,7 @@ python -m pip install git+https://github.com/microseventh/bmlsub.git
 | 状态与恢复 | Run、Stage、Artifact、ProductionRequest、SQLite、指纹、stale、事务化文件提交和安全复用 |
 | 工作站 | 番组配置继承、三阶段单集流程、真实 delivery 单步骤、非阻断字体诊断和发布批次快照 |
 
-虽然 `ProductionOperation` 模型中存在 `remux` 枚举，但当前 CLI 不接受该 operation，`normalize_profile()` 也不允许执行；因此 1.1.3 不提供独立 remux 功能。
+虽然 `ProductionOperation` 模型中存在 `remux` 枚举，但当前 CLI 不接受该 operation，`normalize_profile()` 也不允许执行；因此 1.1.5 不提供独立 remux 功能。
 
 ## 最小本地流程
 

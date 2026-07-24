@@ -2,7 +2,29 @@
 
 All notable changes to `bmlsub` are recorded here.
 
+## 1.1.5 — 2026-07-24
+
+### Workstation reference subtitles
+
+- Extract every matching, supported English text-subtitle track as one transactional Artifact set instead of blocking on same-language candidates.
+- Preserve stable per-stream working copies such as `.en.s2.srt` and `.en.s3.srt`, while retaining a primary/default `.en.srt` compatibility copy.
+- Upgrade the Workstation manifest to v2 with ordered reference-track records, selection policy, resolved stream indices, and an explicit primary track; normalize v1 state compatibly on read.
+- Exclude every registered reference subtitle from formal production-subtitle discovery.
+
+### Transcription plans and recovery
+
+- Compute quick/full/none status from the current preprocess plan so historical chunked or direct failures do not pollute a later policy.
+- Restore saved reference/audio/transcription choices when resuming an incomplete preprocess and prevent an existing `.en` file from incorrectly forcing human handoff after a transcription failure.
+- Give transcript and text artifacts stable job/model/revision/language identities, persist each completed job incrementally, and accept a valid empty transcript export.
+- Clarify that quick mode is one direct full-length transcription with the same Whisper model.
+
+### Verification
+
+- Add multi-track selection, current-plan isolation, recovery-priority, CLI, and empty-transcript regression coverage.
+- Validate `none` and `quick` end to end against a 23-minute Matroska sample containing two English SRT tracks; quick produced 462 segments and completed all expected steps.
+
 ## 1.1.4 — 2026-07-22
+
 
 ### Anibt and Nyaa publication
 

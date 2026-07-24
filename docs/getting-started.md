@@ -19,7 +19,7 @@ bmlsub workstation start delivery -y
 
 ### Interactive Workstation fast mode
 
-`bmlsub workstation start` uses the current directory as the series root and interactively selects an episode. It detects the current phase, offers quick/full/no-transcription choices during preprocess, preserves the human translation handoff, and offers full/MKV-only/MP4-only/custom local production when appropriate. Ordinary users do not need to compose `--series-root`, `--episode-id`, `--execute`, `--transcription`, or delivery-selection flags; those remain advanced CLI automation options.
+`bmlsub workstation start` uses the current directory as the series root and interactively selects an episode. During preprocess it extracts every matching supported English text-subtitle track, publishes stream-indexed working copies plus a primary/default compatibility copy, and offers quick/full/no-transcription choices. Quick runs one direct full-length transcription with the same Whisper model. Current-plan state keeps historical jobs from polluting the selected policy and resumes incomplete preprocessing before human handoff. Local production still offers full/MKV-only/MP4-only/custom scope when appropriate.
 
 ### Interactive external delivery
 
@@ -136,7 +136,7 @@ command -v ffmpeg ffprobe mkvmerge ssh
 Expected package version:
 
 ```text
-bmlsub 1.1.3
+bmlsub 1.1.5
 ```
 
 If `ffmpeg` or `ffprobe` resolves unexpectedly, confirm the linked tap formula with `brew info homebrew-ffmpeg/ffmpeg/ffmpeg` and inspect `brew --prefix` and `PATH`.
@@ -170,4 +170,4 @@ bmlsub workstation preprocess --workspace /path/to/series/01 --episode-id 01
 bmlsub workstation status --workspace /path/to/series/01
 ```
 
-Preprocess auto-selects only a unique top-level source video. Delivery inherits release names and Production Profiles from the direct-parent `bgminfo/series.json`, requires one formal `<episode>.CHS&JPN.ass` and top-level Aegisub-collected fonts, and allows explicit episode overrides. Workstation then checks for an optional formal `<episode>.CHT&JPN.ass` (case-insensitive): if present, it registers and uses that subtitle directly for the `h264-cht` product and the CHT track in the MKV; if absent, it calls the configured Taiwan conversion provider to generate CHT from CHS. Publication remains inert until `--confirm-external-action` is supplied.
+Preprocess auto-selects only a unique top-level source video. By default it extracts every matching supported English text-subtitle track, writes `.en.s<stream-index>` working copies, and retains `.en` as the primary/default compatibility copy. Use repeated `--reference-stream-index` values with `--reference-policy explicit` to constrain the set. Manifest v1 state is normalized compatibly and the next state update writes v2. Delivery excludes all registered reference paths when discovering the formal CHS subtitle, inherits release names and Production Profiles from the direct-parent `bgminfo/series.json`, and requires one formal `<episode>.CHS&JPN.ass` plus top-level Aegisub-collected fonts. Workstation then checks for an optional formal `<episode>.CHT&JPN.ass` (case-insensitive): if present, it registers and uses that subtitle directly for the `h264-cht` product and the CHT track in the MKV; if absent, it calls the configured Taiwan conversion provider to generate CHT from CHS. Publication remains inert until `--confirm-external-action` is supplied.

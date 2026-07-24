@@ -30,6 +30,7 @@ from .video import get_current_artifact, resolve_video
 
 AUDIO_STAGE = "media.extract_audio"
 SUBTITLE_STAGE = "media.extract_subtitle"
+SUBTITLES_STAGE = "media.extract_subtitles"
 ATTACHMENT_STAGE = "media.extract_attachments"
 AUDIO_PROFILE_VERSION = "audio-profile-v1"
 SUBTITLE_PROFILE_VERSION = "subtitle-profile-v1"
@@ -263,6 +264,135 @@ def run_subtitle_extraction(*, workspace: Path | str, episode_id: str,
 
     return StageRunner(ledger).run(
         workspace=root, command_name="media.extract-subtitle", stage_name=SUBTITLE_STAGE,
+        episode_id=episode_id, input_fingerprint=input_fp,
+        parameter_fingerprint=parameter_fp, tool_fingerprint=tool_fp,
+        adapter=adapter, inputs=(StageInputBinding(video.artifact_id, "video", 0),),
+        force=force,
+    )
+
+
+def run_subtitle_extractions(*, workspace: Path | str, episode_id: str,
+                             stream_indices: tuple[int, ...] | list[int],
+                             video_artifact_id: str | None = None,
+                             purpose: str | None = None,
+                             output_dir: Path | str | None = None,
+                             ffmpeg: Path | str = "ffmpeg",
+                             ffprobe: Path | str = "ffprobe",
+                             process_timeout: float = 300.0,
+                             probe_timeout: float = 30.0,
+                             runner: ProcessRunner | None = None,
+                             probe: FFprobeClient | None = None,
+                             store: SQLiteJobStore | None = None,
+                             state_dir: Path | str | None = None,
+                             force: bool = False) -> StageResult:
+    """Extract an explicit, ordered set of text subtitle tracks atomically."""
+    root = Path(workspace).expanduser().resolve()
+    ledger = store or SQLiteJobStore.for_workspace(root, state_dir)
+    ledger.initialize()
+    video = _resolve_video(ledger, episode_id, video_artifact_id, purpose, TrackKind.SUBTITLE)
+    requested = tuple(dict.fromkeys(int(item) for item in stream_indices))
+    candidates = candidates_from_artifact(video, TrackKind.SUBTITLE)
+    by_index = {item.index: item for item in candidates}
+    try:
+        if not requested:
+            raise ReviewRequiredError("at least one subtitle stream index is required")
+        missing = [item for item in requested if item not in by_index]
+        if missing:
+            raise ReviewRequiredError(
+                "requested subtitle stream index is not available",
+                details={"stream_indices": missing,
+                         "candidates": [item.to_dict() for item in candidates[:32]]},
+            )
+        tracks = tuple(by_index[item] for item in requested)
+        directory = output_directory(root, episode_id, output_dir)
+        output_specs = tuple(
+            (track, *subtitle_output_path(directory, episode_id, track))
+            for track in tracks
+        )
+    except ReviewRequiredError as exc:
+        return _selection_review_result(
+            ledger, root, episode_id, SUBTITLES_STAGE, video,
+            {"stream_indices": list(requested)}, exc,
+        )
+    targets = tuple(item[1] for item in output_specs)
+    if len({str(path).casefold() for path in targets}) != len(targets):
+        raise ValueError("subtitle output paths must be unique")
+    process = runner or ProcessRunner(timeout=process_timeout)
+    inspector = probe or FFprobeClient(ffprobe, timeout=probe_timeout)
+    ffmpeg_version = process.version(ffmpeg)
+    ffprobe_version = inspector.version()
+    source_duration = _source_duration(video)
+    input_fp = hash_json({"artifact_id": video.artifact_id,
+                          "fingerprint": video.source_fingerprint})
+    plan = [
+        {
+            "stream_index": track.index, "language": track.language,
+            "source_codec": track.codec_name, "extension": extension,
+            "target": str(target.relative_to(root)),
+        }
+        for track, target, extension, _expected_codec in output_specs
+    ]
+    parameter_fp = fingerprint_parameters({
+        "tracks": plan, "selection_version": TRACK_SELECTION_VERSION,
+        "naming_version": OUTPUT_NAMING_VERSION,
+        "profile_version": SUBTITLE_PROFILE_VERSION,
+    })
+    tool_fp = fingerprint_tools({
+        "bmlsub": __version__, "ffmpeg": ffmpeg_version, "ffprobe": ffprobe_version,
+        "process_runner": PROCESS_RUNNER_VERSION, "validator": MEDIA_VALIDATOR_VERSION,
+    })
+
+    def adapter(context: StageContext) -> StageOutcome:
+        validation: dict[int, dict[str, Any]] = {}
+        specs = []
+        for track, target, extension, expected_codec in output_specs:
+            def validator(path: Path, selected=track,
+                          codec=expected_codec) -> None:
+                validation[selected.index] = validate_subtitle_output(
+                    path, probe=inspector, expected_codec=codec,
+                    source_duration_ms=source_duration,
+                )
+            specs.append(ArtifactWriteSpec(
+                target=target, artifact_type=f"generated.subtitle.{extension}",
+                validator=validator,
+                metadata=_artifact_metadata(video.artifact_id, track, "subtitle"),
+            ))
+        writer = ArtifactBatchWriter(
+            workspace=root, run_id=context.run_id, stage_id=context.stage_id,
+            episode_id=episode_id, source_fingerprint=input_fp,
+            parameter_fingerprint=parameter_fp,
+        )
+
+        def produce(paths: tuple[Path, ...]) -> None:
+            for (track, _target, extension, _expected_codec), candidate in zip(output_specs, paths):
+                process.run([
+                    str(ffmpeg), "-nostdin", "-y", "-v", "error", "-i", str(video.path),
+                    "-map", f"0:{track.index}", "-vn", "-an", "-dn", "-c:s", "copy",
+                    "-f", extension, str(candidate),
+                ], timeout=process_timeout)
+
+        results = writer.write(tuple(specs), produce)
+        artifacts = []
+        diagnostics = []
+        for track, result in zip(tracks, results):
+            metadata = dict(result.artifact.metadata)
+            metadata["media"] = validation[track.index]
+            artifacts.append(_replace_metadata(result.artifact, metadata))
+            if result.backup_path:
+                diagnostics.append(Diagnostic(
+                    code="artifact_backup_created",
+                    message="existing subtitle output was backed up",
+                    context={"path": str(result.backup_path)},
+                ))
+        diagnostics.append(Diagnostic(
+            code="subtitle_tracks_extracted",
+            message="selected subtitle tracks were extracted atomically",
+            context={"stream_indices": list(requested), "track_count": len(tracks)},
+        ))
+        return StageOutcome(artifacts=tuple(artifacts), diagnostics=tuple(diagnostics))
+
+    return StageRunner(ledger).run(
+        workspace=root, command_name="media.extract-subtitles", stage_name=SUBTITLES_STAGE,
         episode_id=episode_id, input_fingerprint=input_fp,
         parameter_fingerprint=parameter_fp, tool_fingerprint=tool_fp,
         adapter=adapter, inputs=(StageInputBinding(video.artifact_id, "video", 0),),

@@ -6,7 +6,8 @@ from .delivery import (
     validate_translation_delivery,
 )
 from .models import (
-    DeliveryConfig, DeliverySelection, PreprocessConfig, PublishConfig, TrackSelection,
+    DeliveryConfig, DeliverySelection, PreprocessConfig, PublishConfig,
+    ReferenceTrackSelection, TrackSelection,
     TranscriptionJob, WorkstationConfig, transcription_jobs_for_mode,
 )
 from .naming import ProductKind, ReleaseNames, product_filename, product_path, product_torrent_path
@@ -32,7 +33,7 @@ __all__ = [
     "write_series_metadata_template", "discover_episode_directories",
     "execute_recommended_action", "inspect_episode_stage", "inspect_series_workspace",
     "plan_rebuild", "resolve_series_root", "run_rebuild",
-    "TrackSelection", "TranscriptionJob", "transcription_jobs_for_mode", "Workstation", "WorkstationConfig", "load_status",
+    "ReferenceTrackSelection", "TrackSelection", "TranscriptionJob", "transcription_jobs_for_mode", "Workstation", "WorkstationConfig", "load_status",
     "open_workstation", "discover_series_context", "plan_delivery", "plan_delivery_execution", "plan_preprocess", "plan_publish", "product_filename",
     "product_path", "product_torrent_path", "run_delivery", "run_delivery_step",
     "run_preprocess", "run_preprocess_step", "run_publish", "run_publish_step",

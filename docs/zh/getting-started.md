@@ -152,7 +152,7 @@ command -v ffmpeg ffprobe mkvmerge ssh
 预期包版本：
 
 ```text
-bmlsub 1.1.3
+bmlsub 1.1.5
 ```
 
 如果 `ffmpeg` 或 `ffprobe` 指向异常位置，请先通过 `brew info homebrew-ffmpeg/ffmpeg/ffmpeg` 确认 tap 公式已 linked，再检查 `brew --prefix` 和 `PATH`。
@@ -186,4 +186,4 @@ bmlsub workstation preprocess --workspace /path/to/series/01 --episode-id 01
 bmlsub workstation status --workspace /path/to/series/01
 ```
 
-预处理只自动接受唯一顶层源视频。交付从直接父级 `bgminfo/series.json` 继承发布命名和 Production Profile，要求正式 `<集数>.CHS&JPN.ass` 与顶层 Aegisub 字体，并允许显式单集覆盖。Workstation 随后检查可选的正式 `<集数>.CHT&JPN.ass`（文件名大小写不敏感）：存在时直接登记，并用于 `h264-cht` 成品和 MKV 的繁体字幕轨；不存在时，才通过配置的台湾繁化服务从简体字幕生成繁体字幕。未传 `--confirm-external-action` 时，发布不会产生外部副作用。
+预处理默认提取全部匹配且受支持的英语文本字幕轨，并以 `.en.s<流索引>` 区分；视频 default 英语轨作为 primary，同时保留一个兼容的 `.en` 副本。若要显式限制轨道，可重复传入 `--reference-stream-index` 并使用 `--reference-policy explicit`。Manifest v1 会在读取时兼容规范化，下一次状态更新写为 v2。quick 使用相同 Whisper 模型执行一次 direct 整段转录；quick/full/none 只按当前计划计算状态，未完成预处理会优先恢复，不会因已有 `.en` 文件误入人工交接。交付会排除 Manifest 中全部参考字幕路径，再从直接父级 `bgminfo/series.json` 继承发布命名和 Production Profile，要求正式 `<集数>.CHS&JPN.ass` 与顶层 Aegisub 字体，并允许显式单集覆盖。Workstation 随后检查可选的正式 `<集数>.CHT&JPN.ass`（文件名大小写不敏感）：存在时直接登记，并用于 `h264-cht` 成品和 MKV 的繁体字幕轨；不存在时，才通过配置的台湾繁化服务从简体字幕生成繁体字幕。未传 `--confirm-external-action` 时，发布不会产生外部副作用。

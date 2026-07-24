@@ -57,6 +57,21 @@ SQLite 是权威状态；`manifest.json` 提供快速编排需要的当前 Artif
 
 显式 CLI 参数只覆盖本集对应字段。最终解析值写入 `workstation/state/config.json`。快速模式和完整模式都使用最终的 `config.delivery.hevc_parameters`、`hardsub_parameters` 和 `torrent_profile`，不会让 CLI 默认空 JSON 覆盖番组 Profile。
 
+## 3.1 参考字幕和转录策略
+
+从 1.1.5 起，preprocess 默认使用 `all-matching` 提取全部匹配且受支持的英语文本字幕轨。每轨生成 `.en.s<流索引>` 工作副本，视频 default 轨作为 primary，并额外保留 `.en` 兼容副本。显式选择多个轨时可重复传入：
+
+```bash
+bmlsub workstation preprocess \
+  --workspace /path/to/series/11 \
+  --reference-policy explicit \
+  --reference-stream-index 2 \
+  --reference-stream-index 3
+```
+
+quick/full/none 分别形成当前 preprocess plan：quick 只要求一次 direct 整段转录，full 还要求 chunked，none 不要求 Whisper。Summary 只计算当前 plan 的 expected steps，历史失败不会污染新策略。转录或导出失败后，普通 `workstation start` 优先恢复 preprocess，已存在的英语参考文件不会错误触发人工交接。
+
+
 ## 4. 命令和步骤
 
 ```bash

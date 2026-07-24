@@ -427,7 +427,10 @@ def build_parser() -> argparse.ArgumentParser:
     workstation_start.add_argument("--traditionalization-timeout", type=int, default=60)
     workstation_start.add_argument("--execute", action="store_true")
     workstation_start.add_argument("--source-video", type=Path)
-    workstation_start.add_argument("--reference-stream-index", type=int)
+    workstation_start.add_argument(
+        "--reference-policy", choices=("all-matching", "explicit", "unique"),
+    )
+    workstation_start.add_argument("--reference-stream-index", type=int, action="append", default=[])
     workstation_start.add_argument("--audio-stream-index", type=int)
     workstation_start.add_argument("--production-subtitle", type=Path)
     workstation_start.add_argument(
@@ -484,7 +487,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     workstation_rebuild.add_argument("--transcription", choices=("quick", "full", "none"))
     workstation_rebuild.add_argument("--source-video", type=Path)
-    workstation_rebuild.add_argument("--reference-stream-index", type=int)
+    workstation_rebuild.add_argument(
+        "--reference-policy", choices=("all-matching", "explicit", "unique"),
+        default="all-matching",
+    )
+    workstation_rebuild.add_argument("--reference-stream-index", type=int, action="append", default=[])
     workstation_rebuild.add_argument("--audio-stream-index", type=int)
     workstation_rebuild.add_argument("--production-subtitle", type=Path)
     workstation_rebuild.add_argument("--confirm-rebuild", action="store_true")
@@ -533,7 +540,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_workstation_common_arguments(workstation_preprocess)
     workstation_preprocess.add_argument("--source-video", type=Path)
     workstation_preprocess.add_argument("--reference-language", default="eng")
-    workstation_preprocess.add_argument("--reference-stream-index", type=int)
+    workstation_preprocess.add_argument(
+        "--reference-policy", choices=("all-matching", "explicit", "unique"),
+        default="all-matching",
+    )
+    workstation_preprocess.add_argument("--reference-stream-index", type=int, action="append", default=[])
     workstation_preprocess.add_argument("--audio-language", default="jpn")
     workstation_preprocess.add_argument("--audio-stream-index", type=int)
     workstation_preprocess.add_argument(
@@ -1101,7 +1112,7 @@ def _prompt_markdown_notes() -> str | None:
 
 def _prompt_transcription_mode(default: str = "full") -> str:
     print(ui_text("是否执行转录：", "Transcription mode:"), file=sys.stderr)
-    print(ui_text("  1. 快速转录一次", "  1. One quick transcription"), file=sys.stderr)
+    print(ui_text("  1. 单次整段转录（较快）", "  1. One direct full-length transcription (faster)"), file=sys.stderr)
     print(ui_text("  2. 完整转录 + 切片转录（默认）", "  2. Full plus chunked transcription (default)"), file=sys.stderr)
     print(ui_text("  3. 不转录", "  3. Do not transcribe"), file=sys.stderr)
     value = _prompt_default(ui_text("请选择 1、2 或 3", "Select 1, 2, or 3"), "2")
@@ -1323,18 +1334,40 @@ def _workstation_start(args: argparse.Namespace) -> dict[str, Any]:
     elif not execute and sys.stdin.isatty():
         execute = _confirm_stderr(f"是否执行 {inspection['recommended_action']}")
     transcription = args.transcription
+    saved_preprocess = None
     if inspection["recommended_action"] == "run_preprocess":
+        incomplete = any(
+            item.get("code") == "preprocess_incomplete"
+            for item in inspection.get("evidence", [])
+        )
+        if incomplete:
+            from .workstation.start import _saved_preprocess_options
+            saved_preprocess = _saved_preprocess_options(inspection["episode_dir"])
+        if transcription is None and saved_preprocess:
+            saved_policy = saved_preprocess.get("transcription_policy")
+            if saved_policy in {"quick", "full", "none"}:
+                transcription = saved_policy
         if transcription is None and sys.stdin.isatty():
             transcription = _prompt_transcription_mode()
         transcription = transcription or "full"
     from .workstation import transcription_jobs_for_mode
     whisper_jobs = transcription_jobs_for_mode(transcription) if transcription else ()
+    reference_indices = tuple(args.reference_stream_index)
+    reference_policy = args.reference_policy
+    audio_stream_index = args.audio_stream_index
+    if saved_preprocess:
+        if not reference_indices:
+            reference_indices = tuple(saved_preprocess.get("reference_stream_indices") or ())
+        reference_policy = reference_policy or saved_preprocess.get("reference_policy")
+        if audio_stream_index is None:
+            audio_stream_index = saved_preprocess.get("audio_stream_index")
     return execute_recommended_action(
         inspection, confirmed=execute,
         confirm_external_action=False, force=args.force,
         source_video=args.source_video,
-        reference_stream_index=args.reference_stream_index,
-        audio_stream_index=args.audio_stream_index,
+        reference_stream_indices=reference_indices,
+        reference_policy=reference_policy or "all-matching",
+        audio_stream_index=audio_stream_index,
         production_subtitle=args.production_subtitle, whisper_jobs=whisper_jobs,
         delivery_selection=delivery_selection,
     )
@@ -1789,7 +1822,8 @@ def _workstation_rebuild(args: argparse.Namespace) -> dict[str, Any]:
     return run_rebuild(
         plan, confirmed=confirmed, source_video=args.source_video,
         production_subtitle=args.production_subtitle,
-        reference_stream_index=args.reference_stream_index,
+        reference_stream_indices=tuple(args.reference_stream_index),
+        reference_policy=args.reference_policy,
         audio_stream_index=args.audio_stream_index,
         whisper_jobs=transcription_jobs_for_mode(transcription) if transcription else (),
     )
@@ -1885,7 +1919,8 @@ def _workstation_preprocess(args: argparse.Namespace) -> dict[str, Any]:
     return run_preprocess(
         args.workspace, episode_id=args.episode_id, source_video=args.source_video,
         reference_language=args.reference_language,
-        reference_stream_index=args.reference_stream_index,
+        reference_stream_indices=tuple(args.reference_stream_index),
+        reference_policy=args.reference_policy,
         audio_language=args.audio_language, audio_stream_index=args.audio_stream_index,
         whisper_jobs=transcription_jobs_for_mode(args.transcription),
         force=args.force,
