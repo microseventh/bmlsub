@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import json
 import unittest
+from unittest.mock import patch
 
 from bmlsub.workstation import (
     DeliverySelection, SeriesMetadata, create_series_metadata, discover_episode_directories,
@@ -28,15 +29,13 @@ class WorkstationStartTests(unittest.TestCase):
     def test_start_command_parser_has_explicit_delivery_subcommand(self):
         from bmlsub.cli import build_parser
         parser = build_parser()
-        plain = parser.parse_args(["workstation", "start"])
-        delivery = parser.parse_args([
-            "workstation", "start", "delivery", "--episode-id", "01",
-            "--confirm-external-action",
-        ])
-        self.assertEqual(plain.workstation_start_command, None)
-        self.assertEqual(delivery.workstation_start_command, "delivery")
-        self.assertEqual(delivery.episode_id, "01")
-        self.assertTrue(delivery.confirm_external_action)
+        start = parser.parse_args(["ws", "start"])
+        end = parser.parse_args(["ws", "end"])
+        unattended = parser.parse_args(["ws", "end", "yes"])
+        self.assertEqual(start.ws_command, "start")
+        self.assertEqual(end.ws_command, "end")
+        self.assertIsNone(end.unattended)
+        self.assertEqual(unattended.unattended, "yes")
 
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -59,6 +58,49 @@ class WorkstationStartTests(unittest.TestCase):
             self.assertFalse((root / "bgminfo" / "series.json").exists())
             with self.assertRaises(FileExistsError):
                 write_series_metadata_template(root)
+
+    def test_numeric_workspace_without_metadata_stays_standalone(self):
+        with TemporaryDirectory() as temporary:
+            parent = Path(temporary) / "Project"
+            episode = parent / "04"
+            episode.mkdir(parents=True)
+
+            self.assertEqual(resolve_series_root(episode), episode.resolve())
+            with patch("bmlsub.workstation.start.Path.cwd", return_value=episode):
+                self.assertEqual(resolve_series_root(), episode.resolve())
+                inspected = inspect_series_workspace()
+            self.assertEqual(inspected["series_root"], str(episode.resolve()))
+            self.assertEqual(inspected["workspace_layout"], "standalone_episode")
+            self.assertEqual(inspected["episodes"], [{
+                "episode_id": "04", "episode_dir": str(episode.resolve()),
+            }])
+            self.assertEqual(inspected["next_action"], "create_series_metadata")
+
+    def test_non_numeric_series_root_remains_itself(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary) / "Series Root"
+            (root / "04").mkdir(parents=True)
+            self.assertEqual(resolve_series_root(root), root.resolve())
+
+    def test_numeric_directory_with_local_metadata_is_standalone(self):
+        with TemporaryDirectory() as temporary:
+            episode = Path(temporary) / "04"
+            episode.mkdir()
+            self.make_series(episode, episodes=())
+            metadata = episode / "bgminfo" / "series.json"
+            before = metadata.read_bytes()
+
+            self.assertEqual(resolve_series_root(episode), episode.resolve())
+            inspected = inspect_series_workspace(episode)
+            self.assertEqual(inspected["status"], "succeeded")
+            self.assertEqual(inspected["workspace_layout"], "standalone_episode")
+            context = discover_series_context(episode)
+            self.assertEqual(context.series_root, episode.resolve())
+            self.assertEqual(context.episode_dir, episode.resolve())
+            self.assertEqual(context.episode_id, "04")
+            self.assertEqual(context.workspace_layout, "standalone_episode")
+            self.assertTrue(metadata.is_file())
+            self.assertEqual(metadata.read_bytes(), before)
 
     def test_physical_stage_matrix(self):
         with TemporaryDirectory() as temporary:
@@ -146,7 +188,10 @@ class WorkstationStartTests(unittest.TestCase):
                         f"{key}:{label}": f"r2-{key}-{label}"
                         for key in keys for label in ("content", "torrent")
                     },
-                    "remote": {key: f"remote-{key}" for key in keys},
+                    "remote": {
+                        f"{key}:{label}": f"remote-{key}-{label}"
+                        for key in keys for label in ("content", "torrent")
+                    },
                     "qb": {key: f"qb-{key}" for key in keys},
                     "anibt": {key: f"anibt-{key}" for key in keys},
                 },
@@ -155,6 +200,105 @@ class WorkstationStartTests(unittest.TestCase):
             inspected = inspect_episode_stage(root, "01")
             self.assertEqual(inspected["detected_phase"], "complete")
             self.assertFalse(inspected["executable"])
+
+    def test_registered_completion_checks_artifacts_when_sqlite_state_exists(self):
+        from datetime import datetime, timezone
+        from bmlsub.state.fingerprints import fingerprint_file
+        from bmlsub.state.models import ArtifactRecord, ValidationStatus
+        from bmlsub.workstation.common import open_workstation
+        from bmlsub.workstation.models import WorkstationConfig
+        from bmlsub.workstation.state import update_manifest
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.make_series(root)
+            episode = root / "01"
+            video = episode / "01.mkv"
+            video.write_bytes(b"video")
+            context = discover_series_context(episode)
+            workstation = open_workstation(WorkstationConfig.from_series_context(context))
+            run = workstation.store.create_run(episode, "test", episode_id="01")
+            stage = workstation.store.create_stage(
+                run.run_id, "test.source", input_fingerprint="input",
+                parameter_fingerprint="parameters", tool_fingerprint="tools",
+            )
+            workstation.store.mark_stage_running(stage.stage_id)
+            fingerprint = fingerprint_file(video, content_hash=True)
+            source_id = "source-video"
+            workstation.store.register_artifact(ArtifactRecord(
+                artifact_id=source_id, run_id=run.run_id, stage_id=stage.stage_id,
+                episode_id="01", artifact_type="source.video", path=video,
+                size=fingerprint.size, mtime_ns=fingerprint.mtime_ns,
+                content_hash=fingerprint.content_hash,
+                validation_status=ValidationStatus.VALID,
+                created_at=datetime.now(timezone.utc),
+            ))
+            workstation.store.complete_stage(stage.stage_id)
+            update_manifest(
+                episode,
+                source={"video_artifact_id": source_id},
+                products={
+                    "hardsub_chs_artifact_id": "missing-chs",
+                    "hardsub_cht_artifact_id": "missing-cht",
+                    "muxed_mkv_artifact_id": "missing-mkv",
+                },
+                torrents={
+                    "mp4_chs": "missing-tc", "mp4_cht": "missing-tt",
+                    "mkv_hevc": "missing-tm",
+                },
+            )
+
+            inspected = inspect_episode_stage(root, "01")
+
+            self.assertNotEqual(inspected["detected_phase"], "publish")
+            invalid = [item for item in inspected["evidence"]
+                       if item["code"] == "registered_artifact_invalid"]
+            self.assertEqual(len(invalid), 6)
+
+    def test_invalid_sqlite_state_does_not_trust_complete_manifest(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.make_series(root)
+            episode = root / "01"
+            state = episode / "workstation" / "state"
+            state.mkdir(parents=True)
+            keys = ("mp4_chs", "mp4_cht", "mkv_hevc")
+            manifest = {
+                "schema_version": "workstation-manifest-v2",
+                "source": {"video_artifact_id": "video"},
+                "preprocess": {}, "subtitles": {},
+                "fonts": {"artifact_ids": []},
+                "products": {
+                    "hardsub_chs_artifact_id": "chs",
+                    "hardsub_cht_artifact_id": "cht",
+                    "muxed_mkv_artifact_id": "mkv",
+                },
+                "torrents": {key: f"torrent-{key}" for key in keys},
+                "publish": {
+                    "r2": {
+                        f"{key}:{label}": f"r2-{key}-{label}"
+                        for key in keys for label in ("content", "torrent")
+                    },
+                    "remote": {
+                        f"{key}:{label}": f"remote-{key}-{label}"
+                        for key in keys for label in ("content", "torrent")
+                    },
+                    "qb": {key: f"qb-{key}" for key in keys},
+                    "anibt": {key: f"anibt-{key}" for key in keys},
+                },
+            }
+            (state / "manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8",
+            )
+            (state / "state.sqlite3").write_bytes(b"not-sqlite")
+
+            inspected = inspect_episode_stage(root, "01")
+
+            self.assertNotEqual(inspected["detected_phase"], "complete")
+            self.assertTrue(any(
+                item["code"] == "registered_state_unreadable"
+                for item in inspected["evidence"]
+            ))
 
     def test_explicit_source_resolves_video_ambiguity(self):
         with TemporaryDirectory() as temporary:
@@ -232,11 +376,14 @@ class WorkstationStartTests(unittest.TestCase):
     def test_transcription_job_policies(self):
         quick = transcription_jobs_for_mode("quick")
         self.assertEqual([(item.name, item.mode) for item in quick], [("direct", "direct")])
+        self.assertEqual(quick[0].model, "mlx-community/whisper-medium-mlx")
         full = transcription_jobs_for_mode("full")
         self.assertEqual(
             [(item.name, item.mode) for item in full],
             [("direct", "direct"), ("chunked", "chunked")],
         )
+        self.assertEqual(full[0].model, "mlx-community/whisper-medium-mlx")
+        self.assertEqual(full[1].model, "mlx-community/whisper-large-v3-turbo")
         self.assertEqual(full[1].chunk_seconds, 240.0)
         self.assertEqual(full[1].overlap_seconds, 5.0)
         self.assertEqual(transcription_jobs_for_mode("none"), ())
@@ -244,7 +391,7 @@ class WorkstationStartTests(unittest.TestCase):
             transcription_jobs_for_mode("other")
 
     def test_reference_track_selection_policy_and_cli(self):
-        from bmlsub.cli import build_parser
+        from bmlsub.cli import _legacy_build_parser
         from bmlsub.workstation.preprocess import _select_reference_tracks
 
         tracks = [
@@ -280,7 +427,7 @@ class WorkstationStartTests(unittest.TestCase):
         self.assertEqual(configured.policy, "all_matching")
         self.assertEqual(configured.language, "eng")
 
-        args = build_parser().parse_args([
+        args = _legacy_build_parser().parse_args([
             "workstation", "preprocess", "--reference-policy", "explicit",
             "--reference-stream-index", "3", "--reference-stream-index", "2",
         ])
@@ -336,6 +483,69 @@ class WorkstationStartTests(unittest.TestCase):
             self.assertEqual(inspected["detected_phase"], "preprocess")
             self.assertEqual(inspected["recommended_action"], "run_preprocess")
             self.assertTrue(inspected["executable"])
+
+    def test_saved_preprocess_options_prefer_plan_and_manifest_selection(self):
+        from bmlsub.workstation.start import _saved_preprocess_options
+
+        with TemporaryDirectory() as temporary:
+            episode = Path(temporary)
+            state = episode / "workstation" / "state"
+            state.mkdir(parents=True)
+            (state / "config.json").write_text(json.dumps({
+                "preprocess": {
+                    "transcription_policy": "none",
+                    "reference_tracks": {
+                        "policy": "first_matching", "language": "fra",
+                        "stream_indices": [1],
+                    },
+                    "audio_track": {"language": "jpn", "stream_index": 2},
+                    "whisper_jobs": [{"name": "archive"}],
+                },
+            }), encoding="utf-8")
+            (state / "preprocess-plan.json").write_text(json.dumps({
+                "phase": "preprocess", "policy": "full",
+            }), encoding="utf-8")
+            (state / "manifest.json").write_text(json.dumps({
+                "preprocess": {"reference_selection": {
+                    "policy": "explicit", "requested_language": "eng",
+                    "resolved_stream_indices": [3, 5],
+                }},
+            }), encoding="utf-8")
+
+            saved = _saved_preprocess_options(episode)
+
+            self.assertEqual(saved["transcription_policy"], "full")
+            self.assertEqual(saved["reference_policy"], "explicit")
+            self.assertEqual(saved["reference_language"], "eng")
+            self.assertEqual(saved["reference_stream_indices"], (3, 5))
+            self.assertEqual(saved["audio_stream_index"], 2)
+            self.assertEqual(saved["whisper_jobs"], ({"name": "archive"},))
+
+    def test_delivery_config_write_preserves_preprocess_section(self):
+        from bmlsub.workstation.delivery import _persist_delivery_config
+        from bmlsub.workstation.models import WorkstationConfig
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.make_series(root)
+            episode = root / "01"
+            context = discover_series_context(episode)
+            state = episode / "workstation" / "state"
+            state.mkdir(parents=True)
+            preserved = {
+                "transcription_policy": "full",
+                "audio_track": {"language": "jpn", "stream_index": 2},
+            }
+            (state / "config.json").write_text(json.dumps({
+                "preprocess": preserved,
+            }), encoding="utf-8")
+
+            _persist_delivery_config(
+                episode, WorkstationConfig.from_series_context(context),
+            )
+
+            payload = json.loads((state / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["preprocess"], preserved)
 
     def test_delivery_selection_scopes_and_dependencies(self):
         full = DeliverySelection.for_scope("full")
@@ -443,6 +653,26 @@ class WorkstationStartTests(unittest.TestCase):
             plain = _anibt_profile(config, "01", plain_path, "mkv_hevc")
             self.assertNotIn("nyaa", plain)
             self.assertNotIn("trackers", plain)
+
+            with self.assertRaisesRegex(ValueError, "publication identity"):
+                _anibt_profile(PublishConfig(), "01", plain_path, "mkv_hevc")
+
+    def test_publish_plan_requires_bgm_or_anime_identity(self):
+        from bmlsub.workstation.publish import plan_publish
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.make_series(root)
+
+            plan = plan_publish(root / "01")
+
+            self.assertIn("publication_identity", plan["missing"])
+            self.assertEqual(plan["status"], "failed")
+
+    def test_qb_interactive_default_uses_https(self):
+        from bmlsub.cli import DEFAULT_QB_WEBUI_ORIGIN
+
+        self.assertEqual(DEFAULT_QB_WEBUI_ORIGIN, "https://127.0.0.1:8080")
 
     def test_publish_remote_paths_are_flat_but_r2_keys_are_nested(self):
         from bmlsub.workstation import PublishConfig, WorkstationConfig

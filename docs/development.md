@@ -1,50 +1,33 @@
-# Development and release checks
+# 开发与测试
 
-[中文](zh/development.md) · [Documentation home](../README.md)
-
-Use Conda base and install the complete project in editable mode:
+## 环境
 
 ```bash
-conda activate base
-cd /path/to/bmlsub
-python -m pip install -e .
+conda activate bmlsub
+python -m pip install -e '.[transcription]'
 ```
 
-## Source checks
+项目要求 Python 3.10+；开发环境推荐 Python 3.12。媒体测试需要 `ffmpeg`、`ffprobe` 和 `mkvmerge`。
 
-The public GitHub repository includes the automated regression tests in `tests/` and the reusable maintenance utilities in `tools/`. Private validation media, local credentials, generated state, and operator-specific automation are not published. Before a release, run the repository tests and then validate the installed public package directly:
+## 常用检查
 
 ```bash
-python -m unittest discover -s tests
-python -m compileall -q bmlsub
-bmlsub --version
+python -m unittest discover -s tests -v
+python -m compileall bmlsub
+git diff --check
 bmlsub --help
-bmlsub workstation series create --help
-bmlsub workstation delivery --help
+bmlsub --version
 ```
 
-Exercise the installed CLI and public Python API in temporary workspaces. At minimum verify series creation, default refusal to overwrite, explicit replacement, series discovery from a numeric episode directory, subtitle conversion/reuse, Run query, and machine-readable stdout.
+测试应覆盖 CLI 拒绝规则、Workstation 阶段判断、Artifact 漂移、回执复用、凭据安全边界、平台锁和外部 adapter 的模拟响应。不要在自动化测试中使用真实 Token、真实发布目录或真实外部发布接口。
 
-## Packaging checks
+## 代码边界
 
-Build both distribution formats and inspect their contents before upload:
+- `bmlsub/cli.py`：紧凑公开 CLI 和交互入口。
+- `bmlsub/workstation/`：Workstation 阶段、问题菜单、计划和状态。
+- `bmlsub/workstation/operations.py`：独立操作注册表。
+- `bmlsub/credentials/`：清单模型和系统 Secret Store。
+- `bmlsub/release/`：R2、VPS、qBittorrent、Anibt adapter。
+- `bmlsub/state/`：SQLite 作业和 Artifact 状态。
 
-```bash
-python -m build
-python -m zipfile -l dist/*.whl
-```
-
-The wheel must contain only package source and distribution metadata. The sdist may additionally contain the repository documentation, `tests/`, and `tools/`, but neither archive may contain `.claude/`, build caches, local databases, credentials, media, receipts, or private validation paths. Install the built wheel into a clean environment and repeat the CLI smoke checks.
-
-## Repository hygiene
-
-`.gitignore` excludes Python/build caches, local state/log/backups, credential/env/key files, media, torrents, receipts, analyses, and fonts. Before publication, scan for:
-
-- `.DS_Store`, `__pycache__`, egg-info, build/dist leftovers;
-- SQLite/database/log files and generated media;
-- private key blocks or credential-like values;
-- absolute home paths, private host aliases, and project-specific validation names;
-- unexpected files larger than 1 MB;
-- broken relative Markdown links.
-
-New Stages should continue to use StageRunner, actual `stage_inputs`, Artifact writers, argv-only ProcessRunner, strict normalized Profiles, and shared CLI/Pipeline business implementations. External release smoke checks must use fake clients or explicit bounded read-only probes unless the operator separately confirms a real side effect.
+新增外部动作时必须增加输入身份、回执验证、失败恢复和无 Secret 日志测试。不要通过 CLI 重新暴露已经移除的旧业务 flag。

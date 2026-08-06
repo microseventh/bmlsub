@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Callable
 import mimetypes
 
+from ..interactive import ui_text
+from ..progress import finish_progress_task, progress_task
 from .common import open_workstation
 from ..state.models import ValidationStatus
 from ..state.sqlite_store import SQLiteJobStore
@@ -44,6 +46,8 @@ def plan_publish(episode_dir: Path | str, *, episode_id: str | None = None,
                       config.remote_dir, config.ssh_alias or config.ssh_profile))
     if not configured:
         missing.append("publish_configuration")
+    if config.bgm_id is None and not config.anime_id:
+        missing.append("publication_identity")
     deliveries = []
     store = SQLiteJobStore.for_workspace(root, root / "workstation" / "state")
     store.initialize()
@@ -193,12 +197,21 @@ def run_publish(episode_dir: Path | str, *, episode_id: str | None = None,
                 "access": config.r2_access,
                 "public_base_url": config.r2_public_base_url,
             }
-            uploaded = workstation.pipeline.upload_r2(
-                workspace=root, episode_id=identifier, artifact_id=artifact.artifact_id,
-                profile={key: value for key, value in profile.items() if value is not None},
-                credential_manifest=config.credential_manifest,
-                credential_profile=config.r2_credential_profile, force=force,
-            )
+            with progress_task(
+                phase="publish", step=f"publish.upload_r2.{product_key}.{label}",
+                label=ui_text("上传到 R2", "Upload to R2"),
+                current=0, total=artifact.size, unit="bytes", detail=artifact.path.name,
+                heartbeat=False,
+            ) as task:
+                uploaded = workstation.pipeline.upload_r2(
+                    workspace=root, episode_id=identifier, artifact_id=artifact.artifact_id,
+                    profile={key: value for key, value in profile.items() if value is not None},
+                    credential_manifest=config.credential_manifest,
+                    credential_profile=config.r2_credential_profile, force=force,
+                )
+                if uploaded.get("status") in {"succeeded", "skipped"}:
+                    task.update(current=artifact.size)
+                finish_progress_task(task, uploaded)
             upload_step = pipeline_payload_step(
                 root, workflow_id=workstation.config.workflow_id, phase="publish",
                 step="publish.upload_r2", payload=uploaded,
@@ -216,20 +229,29 @@ def run_publish(episode_dir: Path | str, *, episode_id: str | None = None,
         if blocked:
             return blocked
         for label, artifact in (("content", content), ("torrent", torrent)):
-            pulled = workstation.pipeline.pull_remote(
-                workspace=root, episode_id=identifier,
-                content_artifact_id=artifact.artifact_id,
-                r2_receipt_artifact_id=receipt_ids["r2"][f"{product_key}:{label}"],
-                profile={
-                    "ssh_alias": config.ssh_alias or config.ssh_profile,
-                    "rclone_remote": config.rclone_remote, "bucket": config.r2_bucket,
-                    "object_key": config.object_key(
-                        identifier, artifact.path, series_folder_name=context.series_folder_name
-                    ),
-                    "target_path": config.remote_target(artifact.path),
-                }, connection_manifest=config.credential_manifest,
-                ssh_profile=config.ssh_profile, force=force,
-            )
+            with progress_task(
+                phase="publish", step=f"publish.pull_remote.{product_key}.{label}",
+                label=ui_text("同步到 VPS", "Sync to VPS"),
+                current=0, total=artifact.size, unit="bytes", detail=artifact.path.name,
+                heartbeat=False,
+            ) as task:
+                pulled = workstation.pipeline.pull_remote(
+                    workspace=root, episode_id=identifier,
+                    content_artifact_id=artifact.artifact_id,
+                    r2_receipt_artifact_id=receipt_ids["r2"][f"{product_key}:{label}"],
+                    profile={
+                        "ssh_alias": config.ssh_alias or config.ssh_profile,
+                        "rclone_remote": config.rclone_remote, "bucket": config.r2_bucket,
+                        "object_key": config.object_key(
+                            identifier, artifact.path, series_folder_name=context.series_folder_name
+                        ),
+                        "target_path": config.remote_target(artifact.path),
+                    }, connection_manifest=config.credential_manifest,
+                    ssh_profile=config.ssh_profile, force=force,
+                )
+                if pulled.get("status") in {"succeeded", "skipped"}:
+                    task.update(current=artifact.size)
+                finish_progress_task(task, pulled)
             pull_step = pipeline_payload_step(
                 root, workflow_id=workstation.config.workflow_id, phase="publish",
                 step="publish.pull_remote", payload=pulled,
@@ -246,21 +268,27 @@ def run_publish(episode_dir: Path | str, *, episode_id: str | None = None,
         blocked = confirm("seed_qbittorrent", product_key)
         if blocked:
             return blocked
-        seeded = workstation.pipeline.seed_qbittorrent(
-            workspace=root, episode_id=identifier, torrent_artifact_id=torrent_id,
-            content_artifact_id=content_id,
-            remote_content_artifact_id=receipt_ids["remote"][f"{product_key}:content"],
-            remote_torrent_artifact_id=receipt_ids["remote"][f"{product_key}:torrent"],
-            profile={
-                "ssh_alias": config.ssh_alias or config.ssh_profile,
-                "port": config.qb_port, "save_path": config.qb_save_path,
-                "legacy_host_save_path": config.remote_save_path(),
-                "webui_origin": config.qb_webui_origin,
-            }, credential_manifest=config.credential_manifest,
-            credential_profile=config.qb_credential_profile,
-            connection_manifest=config.credential_manifest, ssh_profile=config.ssh_profile,
-            force=force,
-        )
+        with progress_task(
+            phase="publish", step=f"publish.seed_qbittorrent.{product_key}",
+            label=ui_text("qBittorrent 校验并做种", "Verify and seed in qBittorrent"),
+            detail=content.path.name, heartbeat=False,
+        ) as task:
+            seeded = workstation.pipeline.seed_qbittorrent(
+                workspace=root, episode_id=identifier, torrent_artifact_id=torrent_id,
+                content_artifact_id=content_id,
+                remote_content_artifact_id=receipt_ids["remote"][f"{product_key}:content"],
+                remote_torrent_artifact_id=receipt_ids["remote"][f"{product_key}:torrent"],
+                profile={
+                    "ssh_alias": config.ssh_alias or config.ssh_profile,
+                    "port": config.qb_port, "save_path": config.qb_save_path,
+                    "legacy_host_save_path": config.remote_save_path(),
+                    "webui_origin": config.qb_webui_origin,
+                }, credential_manifest=config.credential_manifest,
+                credential_profile=config.qb_credential_profile,
+                connection_manifest=config.credential_manifest, ssh_profile=config.ssh_profile,
+                force=force,
+            )
+            finish_progress_task(task, seeded)
         seed_step = pipeline_payload_step(
             root, workflow_id=workstation.config.workflow_id, phase="publish",
             step="publish.seed_qbittorrent", payload=seeded,
@@ -277,14 +305,20 @@ def run_publish(episode_dir: Path | str, *, episode_id: str | None = None,
         blocked = confirm("anibt", product_key)
         if blocked:
             return blocked
-        published = workstation.pipeline.publish_anibt(
-            workspace=root, episode_id=identifier, torrent_artifact_id=torrent_id,
-            profile=_anibt_profile(
-                config, identifier, content.path, product_key, publish_nyaa=publish_nyaa,
-            ),
-            credential_manifest=config.credential_manifest,
-            credential_profile=config.anibt_credential_profile, force=force,
-        )
+        with progress_task(
+            phase="publish", step=f"publish.anibt.{product_key}",
+            label=ui_text("发布到 Anibt", "Publish to Anibt"),
+            detail=torrent.path.name,
+        ) as task:
+            published = workstation.pipeline.publish_anibt(
+                workspace=root, episode_id=identifier, torrent_artifact_id=torrent_id,
+                profile=_anibt_profile(
+                    config, identifier, content.path, product_key, publish_nyaa=publish_nyaa,
+                ),
+                credential_manifest=config.credential_manifest,
+                credential_profile=config.anibt_credential_profile, force=force,
+            )
+            finish_progress_task(task, published)
         anibt_step = pipeline_payload_step(
             root, workflow_id=workstation.config.workflow_id, phase="publish",
             step="publish.anibt", payload=published,
@@ -312,6 +346,8 @@ def run_publish_step(step: str, episode_dir: Path | str, **kwargs) -> dict[str, 
 
 def _anibt_profile(config: PublishConfig, episode_id: str, path: Path, product_key: str,
                    *, publish_nyaa: bool = False) -> dict[str, Any]:
+    if config.bgm_id is None and not config.anime_id:
+        raise ValueError("publication identity requires bgm_id or anime_id")
     values = {
         "mp4_chs": (["CHS", "JP"], "EMBEDDED", "MP4"),
         "mp4_cht": (["CHT", "JP"], "EMBEDDED", "MP4"),

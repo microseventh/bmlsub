@@ -13,6 +13,8 @@ from typing import Any, Iterator, Mapping, Protocol
 import requests
 
 from ..execution.errors import BmlsubError, ErrorCode
+from ..interactive import ui_text
+from ..progress import get_progress_reporter, get_progress_task, ProgressEvent
 from .credentials import QBittorrentCredentials
 from .external_profiles import QBittorrentSeedProfile
 
@@ -126,6 +128,18 @@ class SSHQBittorrentClient:
             deadline = time.monotonic() + profile.poll_timeout
             while True:
                 identity = self._query_any(session, base_url, query_hashes)
+                if identity is not None:
+                    task = get_progress_task()
+                    if task is not None:
+                        task.update(current=max(0.0, identity.progress), total=1.0,
+                                    unit="ratio", detail=f"{identity.name} ({identity.state})")
+                    else:
+                        get_progress_reporter().report(ProgressEvent(
+                            phase="publish", step=f"release.seed_qbittorrent.check.{expected_hash}",
+                            label=ui_text("qBittorrent 内容校验", "qBittorrent content check"),
+                            state="running", current=max(0.0, identity.progress), total=1.0,
+                            unit="ratio", detail=f"{identity.name} ({identity.state})",
+                        ))
                 if identity is not None and identity.state not in _CHECKING_STATES:
                     if self._is_complete(identity):
                         result = SeedIdentity(**{**identity.__dict__, "used_magnet_fallback": used_fallback})

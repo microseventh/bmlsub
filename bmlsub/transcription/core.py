@@ -10,7 +10,7 @@ import importlib.metadata
 import json
 from pathlib import Path
 import time
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 import wave
 
 from ..artifacts import ArtifactBatchWriter, ArtifactWriteSpec
@@ -28,6 +28,8 @@ TRANSCRIPTION_PROFILE_VERSION = "whisper-profile-v1"
 TRANSCRIPTION_NAMING_VERSION = "transcript-naming-v1"
 TRANSCRIPTION_VALIDATOR_VERSION = "transcript-validator-v2"
 CHUNK_PLAN_VERSION = "ffmpeg-chunk-plan-v1"
+TRANSCRIPTION_PROGRESS_SCHEMA_VERSION = "transcription-progress-v1"
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 class TranscriptionMode(str, Enum):
@@ -128,6 +130,7 @@ def run_transcription(*, workspace: Path | str, episode_id: str,
                       runner: ProcessRunner | None = None,
                       store: SQLiteJobStore | None = None,
                       state_dir: Path | str | None = None,
+                      progress_callback: ProgressCallback | None = None,
                       force: bool = False) -> StageResult:
     root = Path(workspace).expanduser().resolve()
     ledger = store or SQLiteJobStore.for_workspace(root, state_dir)
@@ -247,13 +250,17 @@ def run_transcription(*, workspace: Path | str, episode_id: str,
             transcript_paths = paths[:len(modes)]
             persisted_chunks = paths[len(modes):]
             for mode, candidate in zip(modes, transcript_paths):
-                payload = (_transcribe_direct(audio.path, whisper, config, resolved_model)
+                payload = (_transcribe_direct(
+                               audio.path, whisper, config, resolved_model,
+                               progress_callback=progress_callback,
+                           )
                            if mode is TranscriptionMode.DIRECT else
                            _transcribe_chunked(
                                audio.path, whisper, config, model_path=resolved_model,
                                process=process, ffmpeg=ffmpeg,
                                process_timeout=process_timeout,
                                chunks=chunk_plan, chunk_paths=persisted_chunks,
+                               progress_callback=progress_callback,
                            ))
                 candidate.write_text(
                     json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
@@ -331,12 +338,21 @@ def validate_transcript_output(path: Path, *, expected_mode: TranscriptionMode,
 
 
 def _transcribe_direct(audio_path: Path, backend: WhisperBackend,
-                       options: TranscriptionOptions, model_path: str) -> dict[str, Any]:
+                       options: TranscriptionOptions, model_path: str, *,
+                       progress_callback: ProgressCallback | None = None) -> dict[str, Any]:
+    _emit_progress(
+        progress_callback, mode=TranscriptionMode.DIRECT,
+        status="started",
+    )
     result = backend.transcribe(
         audio_path, model=model_path, language=options.language,
         decoding=options.decoding,
     )
     segments = _normalize_segments(result.get("segments", ()), offset=0.0)
+    _emit_progress(
+        progress_callback, mode=TranscriptionMode.DIRECT,
+        status="completed",
+    )
     return _transcript_payload(options, TranscriptionMode.DIRECT, segments)
 
 
@@ -345,10 +361,16 @@ def _transcribe_chunked(audio_path: Path, backend: WhisperBackend,
                         process: ProcessRunner, ffmpeg: Path | str,
                         process_timeout: float,
                         chunks: tuple[tuple[float, float], ...],
-                        chunk_paths: tuple[Path, ...]) -> dict[str, Any]:
+                        chunk_paths: tuple[Path, ...],
+                        progress_callback: ProgressCallback | None = None) -> dict[str, Any]:
     segments: list[dict[str, Any]] = []
     if len(chunks) != len(chunk_paths):
         raise ValueError("chunk plan and output paths do not match")
+    total = len(chunks)
+    _emit_progress(
+        progress_callback, mode=TranscriptionMode.CHUNKED,
+        status="started", current=0, total=total,
+    )
     for index, ((start, end), chunk_path) in enumerate(zip(chunks, chunk_paths)):
         process.run([
             str(ffmpeg), "-nostdin", "-y", "-v", "error",
@@ -365,10 +387,40 @@ def _transcribe_chunked(audio_path: Path, backend: WhisperBackend,
             result.get("segments", ()), offset=start, chunk_index=index,
             clip_start=start, clip_end=end,
         ))
+        _emit_progress(
+            progress_callback, mode=TranscriptionMode.CHUNKED,
+            status="progress", current=index + 1, total=total,
+            chunk_index=index,
+        )
         if options.throttle_seconds and index + 1 < len(chunks):
             time.sleep(options.throttle_seconds)
     segments.sort(key=lambda item: (item["start"], item["end"], item.get("chunk_index", 0)))
+    _emit_progress(
+        progress_callback, mode=TranscriptionMode.CHUNKED,
+        status="completed", current=total, total=total,
+    )
     return _transcript_payload(options, TranscriptionMode.CHUNKED, segments)
+
+
+def _emit_progress(
+    callback: ProgressCallback | None, *, mode: TranscriptionMode,
+    status: str, current: int | None = None, total: int | None = None,
+    chunk_index: int | None = None,
+) -> None:
+    if callback is None:
+        return
+    event: dict[str, Any] = {
+        "schema_version": TRANSCRIPTION_PROGRESS_SCHEMA_VERSION,
+        "mode": mode.value,
+        "status": status,
+    }
+    if current is not None:
+        event["current"] = current
+    if total is not None:
+        event["total"] = total
+    if chunk_index is not None:
+        event["chunk_index"] = chunk_index
+    callback(event)
 
 
 def _chunk_plan(duration_seconds: float,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import sqlite3
 
 from .common import FONT_SUFFIXES, discover_source_video, resolve_explicit_path
 from .series import SeriesMetadata
@@ -24,12 +25,14 @@ REBUILD_TARGETS = (
 
 
 def resolve_series_root(value: Path | str | None = None) -> Path:
-    """Resolve a series root, accepting a numeric episode directory as input."""
+    """Resolve the metadata-owning workspace without guessing from digits alone."""
     candidate = Path.cwd() if value is None else Path(value).expanduser()
     resolved = candidate.resolve()
     if not resolved.is_dir():
         raise ValueError("series root directory does not exist")
-    if resolved.name.isdigit() and (resolved.parent / "bgminfo").is_dir():
+    if (resolved / "bgminfo" / "series.json").is_file():
+        return resolved
+    if resolved.name.isdigit() and (resolved.parent / "bgminfo" / "series.json").is_file():
         return resolved.parent
     return resolved
 
@@ -37,6 +40,8 @@ def resolve_series_root(value: Path | str | None = None) -> Path:
 def discover_episode_directories(series_root: Path | str) -> tuple[Path, ...]:
     root = resolve_series_root(series_root)
     episodes = [item.resolve() for item in root.iterdir() if item.is_dir() and item.name.isdigit()]
+    if not episodes and root.name.isdigit():
+        return (root,)
     return tuple(sorted(episodes, key=lambda item: (int(item.name), len(item.name), item.name)))
 
 
@@ -72,6 +77,10 @@ def inspect_series_workspace(series_root: Path | str | None = None) -> dict[str,
     return {
         "schema_version": "workstation-start-v1",
         "status": "succeeded" if not blocking else "needs_review",
+        "workspace_layout": (
+            "standalone_episode" if len(episodes) == 1 and episodes[0] == root
+            else "series"
+        ),
         "series_root": str(root),
         "working_directory": str(root),
         "metadata_path": str(metadata_path),
@@ -91,9 +100,12 @@ def inspect_episode_stage(
     identifier = episode_id.strip()
     if not identifier.isdigit():
         raise ValueError("episode_id must contain digits only")
-    episode = (root / identifier).resolve()
-    if episode.parent != root or not episode.is_dir():
+    episode = root if root.name == identifier else (root / identifier).resolve()
+    is_standalone = episode == root and root.name.isdigit()
+    if not is_standalone and (episode.parent != root or not episode.is_dir()):
         raise ValueError("selected episode is not a direct numeric directory of the series root")
+    if is_standalone and not episode.is_dir():
+        raise ValueError("selected standalone episode directory does not exist")
     metadata = SeriesMetadata.load(root / "bgminfo" / "series.json")
     state_dir = episode / "workstation" / "state"
     manifest_path = state_dir / "manifest.json"
@@ -113,6 +125,7 @@ def inspect_episode_stage(
     return {
         "schema_version": "workstation-start-v1",
         "status": "needs_review" if result["detected_phase"] in {"blocked", "ambiguous", "human_handoff"} else "succeeded",
+        "workspace_layout": "standalone_episode" if is_standalone else "series_episode",
         "series_root": str(root),
         "episode_dir": str(episode),
         "episode_id": identifier,
@@ -255,17 +268,31 @@ def _inspect_registered_state(
     evidence = [{"code": "manifest_present", "path": str(manifest_path)}]
     missing = []
     blocking = []
+    valid_artifact_ids = _validated_manifest_artifact_ids(
+        episode, manifest, evidence,
+    )
+
+    def artifact_is_current(artifact_id: Any) -> bool:
+        return bool(artifact_id) and (
+            valid_artifact_ids is None or artifact_id in valid_artifact_ids
+        )
+
     source_id = manifest.get("source", {}).get("video_artifact_id")
-    if source_id:
+    source_registered = artifact_is_current(source_id)
+    if source_registered:
         evidence.append({"code": "source_video_registered", "artifact_id": source_id})
     else:
         missing.append("source.video_artifact_id")
     products = manifest.get("products", {})
     torrents = manifest.get("torrents", {})
     publish = manifest.get("publish", {})
-    products_complete = all(products.get(key) for key in _PRODUCT_MANIFEST_KEYS)
-    torrents_complete = all(torrents.get(key) for key in _TORRENT_MANIFEST_KEYS)
-    publish_complete = _publish_receipts_complete(publish)
+    products_complete = all(
+        artifact_is_current(products.get(key)) for key in _PRODUCT_MANIFEST_KEYS
+    )
+    torrents_complete = all(
+        artifact_is_current(torrents.get(key)) for key in _TORRENT_MANIFEST_KEYS
+    )
+    publish_complete = _publish_receipts_complete(publish, valid_artifact_ids)
     if publish_complete:
         evidence.append({"code": "publish_receipts_complete"})
         return _inspection_result("complete", "high", evidence, missing, blocking, None, False)
@@ -275,7 +302,7 @@ def _inspect_registered_state(
             "publish", "high", evidence, missing, blocking, "run_publish", True,
         )
 
-    if source_id:
+    if source_registered:
         preprocess_status = summary.get("preprocess", {}).get("status")
         if preprocess_status in {"failed", "needs_review", "blocked", "running", "interrupted", "partial"}:
             evidence.append({"code": "preprocess_incomplete", "status": preprocess_status})
@@ -303,7 +330,7 @@ def _inspect_registered_state(
             physical["evidence"].append({"code": "preprocess_summary_succeeded"})
         return physical
 
-    if source_id:
+    if source_registered:
         preprocess_status = summary.get("preprocess", {}).get("status")
         if preprocess_status == "succeeded":
             evidence.append({"code": "preprocess_summary_succeeded"})
@@ -401,36 +428,157 @@ def _inspect_physical_state(
 
 def _saved_preprocess_options(episode_dir: Path | str) -> dict[str, Any]:
     root = Path(episode_dir).expanduser().resolve()
-    config = read_json(root / "workstation" / "state" / "config.json", {})
+    state = root / "workstation" / "state"
+    config = read_json(state / "config.json", {})
     preprocess = config.get("preprocess", {}) if isinstance(config, dict) else {}
     references = preprocess.get("reference_tracks", {})
     audio = preprocess.get("audio_track", {})
     jobs = preprocess.get("whisper_jobs", [])
+    plan = read_json(state / "preprocess-plan.json", {})
+    plan_policy = plan.get("policy") if isinstance(plan, dict) else None
+    manifest_selection = load_manifest(root).get("preprocess", {}).get(
+        "reference_selection", {},
+    )
+    if not isinstance(manifest_selection, dict):
+        manifest_selection = {}
     return {
-        "reference_policy": references.get("policy", "all_matching"),
-        "reference_language": references.get("language", "eng"),
-        "reference_stream_indices": tuple(references.get("stream_indices") or ()),
+        "reference_policy": manifest_selection.get(
+            "policy", references.get("policy", "all_matching"),
+        ),
+        "reference_language": manifest_selection.get(
+            "requested_language", references.get("language", "eng"),
+        ),
+        "reference_stream_indices": tuple(
+            manifest_selection.get("resolved_stream_indices")
+            or references.get("stream_indices") or ()
+        ),
         "audio_language": audio.get("language", "jpn"),
         "audio_stream_index": audio.get("stream_index"),
         "whisper_jobs": tuple(jobs) if isinstance(jobs, list) else (),
-        "transcription_policy": preprocess.get("transcription_policy", "full"),
+        "transcription_policy": plan_policy or preprocess.get(
+            "transcription_policy", "full",
+        ),
     }
 
 
-def _publish_receipts_complete(publish: Any) -> bool:
+def _publish_receipts_complete(
+    publish: Any, valid_artifact_ids: set[str] | None = None,
+) -> bool:
     if not isinstance(publish, dict):
         return False
-    r2 = publish.get("r2")
-    if not isinstance(r2, dict) or not all(
-        r2.get(f"{key}:{label}") for key in _TORRENT_MANIFEST_KEYS
-        for label in ("content", "torrent")
-    ):
-        return False
+
+    def receipt_is_current(value: Any) -> bool:
+        return isinstance(value, str) and bool(value) and (
+            valid_artifact_ids is None or value in valid_artifact_ids
+        )
+
+    for section in ("r2", "remote"):
+        receipts = publish.get(section)
+        if not isinstance(receipts, dict) or not all(
+            receipt_is_current(receipts.get(f"{key}:{label}"))
+            for key in _TORRENT_MANIFEST_KEYS for label in ("content", "torrent")
+        ):
+            return False
     return all(
         isinstance(publish.get(section), dict)
-        and all(publish[section].get(key) for key in _TORRENT_MANIFEST_KEYS)
-        for section in ("remote", "qb", "anibt")
+        and all(receipt_is_current(publish[section].get(key))
+                for key in _TORRENT_MANIFEST_KEYS)
+        for section in ("qb", "anibt")
     )
+
+
+def _validated_manifest_artifact_ids(
+    episode: Path, manifest: dict[str, Any], evidence: list[dict[str, Any]],
+) -> set[str] | None:
+    """Return current manifest Artifact IDs when a real SQLite ledger exists."""
+    database = episode / "workstation" / "state" / "state.sqlite3"
+    if not database.is_file():
+        return None
+    try:
+        with database.open("rb") as stream:
+            if stream.read(16) != b"SQLite format 3\x00":
+                evidence.append({
+                    "code": "registered_state_unreadable",
+                    "message": "state.sqlite3 is not a valid SQLite database",
+                })
+                return set()
+        from ..state.sqlite_store import SQLiteJobStore
+        store = SQLiteJobStore.for_workspace(episode, database.parent)
+        valid = set()
+        for field, artifact_id in _manifest_artifact_references(manifest):
+            artifact = store.get_artifact(artifact_id)
+            current = False
+            if artifact is not None and artifact.validation_status.value == "valid":
+                try:
+                    stat = artifact.path.stat()
+                    current = (
+                        artifact.path.is_file()
+                        and stat.st_size == artifact.size
+                        and stat.st_mtime_ns == artifact.mtime_ns
+                    )
+                except OSError:
+                    current = False
+            if current:
+                valid.add(artifact_id)
+            else:
+                evidence.append({
+                    "code": "registered_artifact_invalid",
+                    "field": field,
+                    "artifact_id": artifact_id,
+                })
+        return valid
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        evidence.append({
+            "code": "registered_state_unreadable", "message": str(exc),
+        })
+        return set()
+
+
+def _manifest_artifact_references(
+    manifest: dict[str, Any],
+) -> tuple[tuple[str, str], ...]:
+    references: list[tuple[str, str]] = []
+
+    def add(field: str, value: Any) -> None:
+        if isinstance(value, str) and value:
+            references.append((field, value))
+
+    def walk_artifact_fields(value: Any, field: str, key: str = "") -> None:
+        if key.endswith("_artifact_id") or key == "artifact_id":
+            add(field, value)
+            return
+        if key.endswith("_artifact_ids") or key == "artifact_ids":
+            if isinstance(value, (list, tuple)):
+                for index, artifact_id in enumerate(value):
+                    add(f"{field}[{index}]", artifact_id)
+            elif isinstance(value, dict):
+                for nested_key, artifact_ids in value.items():
+                    walk_artifact_fields(
+                        artifact_ids, f"{field}.{nested_key}", "artifact_ids",
+                    )
+            return
+        if isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                walk_artifact_fields(
+                    nested_value, f"{field}.{nested_key}", nested_key,
+                )
+        elif isinstance(value, list):
+            for index, nested_value in enumerate(value):
+                walk_artifact_fields(nested_value, f"{field}[{index}]", key)
+
+    for section_name in ("source", "preprocess", "subtitles", "products", "fonts"):
+        walk_artifact_fields(manifest.get(section_name, {}), section_name)
+    for section_name in ("torrents", "publish"):
+        section = manifest.get(section_name, {})
+        if not isinstance(section, dict):
+            continue
+        for key, value in section.items():
+            if isinstance(value, dict):
+                for nested_key, artifact_id in value.items():
+                    add(f"{section_name}.{key}.{nested_key}", artifact_id)
+            else:
+                add(f"{section_name}.{key}", value)
+    return tuple(references)
 
 
 def _inspection_result(phase: str, confidence: str, evidence, missing, blocking,

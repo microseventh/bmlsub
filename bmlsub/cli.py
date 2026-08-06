@@ -13,17 +13,20 @@ import re
 import sys
 from typing import Any
 
-from .credentials import CredentialService, load_secure_json
+from .credentials import CredentialService, load_credential_manifest, load_secure_json
 from .execution.errors import BmlsubError
 from .interactive import (
-    confirmation_prompt, default_prompt, optional_prompt, set_ui_language, ui_text,
+    confirmation_prompt, default_prompt, optional_prompt, set_ui_language, ui_language, ui_text,
 )
 from .pipeline import Pipeline
 from .state.sqlite_store import SQLiteJobStore
 from .version import __version__
 
 
-def build_parser() -> argparse.ArgumentParser:
+DEFAULT_QB_WEBUI_ORIGIN = "https://127.0.0.1:8080"
+
+
+def _legacy_build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bmlsub", description="Reliable BML subtitle workflow")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -620,6 +623,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """Build the intentionally small 1.2.1 public command surface."""
+    from .workstation.operations import OPERATION_NAMES
+
+    parser = argparse.ArgumentParser(
+        prog="bmlsub", description="Reliable BML subtitle workflow",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    ws = commands.add_parser("ws", help="Continue the Workstation workflow")
+    ws_commands = ws.add_subparsers(dest="ws_command", required=True)
+    ws_start = ws_commands.add_parser("start", help="Run Bgminfo, Ensub, and Trans")
+    ws_start.set_defaults(handler=_compact_ws_start)
+    ws_end = ws_commands.add_parser("end", help="Run local delivery and confirmed publication")
+    ws_end.add_argument("unattended", nargs="?", choices=("yes",))
+    ws_end.set_defaults(handler=_compact_ws_end)
+
+    build = commands.add_parser("build", help="Build exactly one standalone operation")
+    build.add_argument("operation", nargs="?", choices=OPERATION_NAMES)
+    build.set_defaults(handler=_compact_build, rebuild=False)
+
+    rebuild = commands.add_parser("rebuild", help="Safely replace one recorded operation")
+    rebuild.add_argument("operation", nargs="?", choices=OPERATION_NAMES)
+    rebuild.set_defaults(handler=_compact_build, rebuild=True)
+    return parser
+
+
 def _add_workstation_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--workspace", default=".")
     parser.add_argument("--episode-id")
@@ -812,21 +843,36 @@ def _reconstruct_ass(args: argparse.Namespace) -> dict[str, Any]:
 
 def _transcribe(args: argparse.Namespace) -> dict[str, Any]:
     from .transcription import parse_timestamp
+    from .progress import finish_progress_task, progress_task
 
     decoding = json.loads(args.decoding_json)
     if not isinstance(decoding, dict):
         raise ValueError("--decoding-json must contain a JSON object")
-    return Pipeline(state_dir=args.state_dir).transcribe(
-        workspace=args.workspace, episode_id=args.episode_id,
-        audio_artifact_id=args.audio_artifact_id, mode=args.mode,
-        model=args.model, model_revision=args.model_revision,
-        language=args.language, chunk_seconds=args.chunk_seconds,
-        overlap_seconds=args.overlap_seconds,
-        manual_cuts=tuple(parse_timestamp(item) for item in args.manual_cut),
-        throttle_seconds=args.throttle_seconds, decoding=decoding,
-        output_dir=args.output_dir, ffmpeg=args.ffmpeg,
-        process_timeout=args.process_timeout, force=args.force,
-    )
+    with progress_task(
+        phase="preprocess", step="transcription.whisper",
+        label=ui_text("MLX Whisper 转录", "MLX Whisper transcription"),
+        detail=args.mode,
+    ) as task:
+        def update(event: dict[str, Any]) -> None:
+            task.update(
+                current=event.get("current"), total=event.get("total"),
+                unit=ui_text("段", "chunks"), detail=str(event.get("mode") or args.mode),
+            )
+
+        payload = Pipeline(state_dir=args.state_dir).transcribe(
+            workspace=args.workspace, episode_id=args.episode_id,
+            audio_artifact_id=args.audio_artifact_id, mode=args.mode,
+            model=args.model, model_revision=args.model_revision,
+            language=args.language, chunk_seconds=args.chunk_seconds,
+            overlap_seconds=args.overlap_seconds,
+            manual_cuts=tuple(parse_timestamp(item) for item in args.manual_cut),
+            throttle_seconds=args.throttle_seconds, decoding=decoding,
+            output_dir=args.output_dir, ffmpeg=args.ffmpeg,
+            process_timeout=args.process_timeout, progress_callback=update,
+            force=args.force,
+        )
+        finish_progress_task(task, payload)
+        return payload
 
 
 def _create_production(args: argparse.Namespace) -> dict[str, Any]:
@@ -1081,12 +1127,15 @@ def _read_notes_file(path: Path | None) -> str | None:
 
 
 def _prompt_markdown_notes() -> str | None:
-    choice = _prompt_stderr(ui_text(
-        "发布说明（Markdown；直接按 Enter 跳过，输入 f 读取文件，输入 p 粘贴多行）: ",
-        "Release notes (Markdown; press Enter to skip, enter f to read a file, or p to paste multiple lines): ",
-    )).lower()
-    if not choice:
+    value = _prompt_stderr(ui_text(
+        "发布说明（Markdown；可直接输入单行，按 Enter 跳过，输入 f 读取文件，输入 p 粘贴多行）: ",
+        "Release notes (Markdown; enter one line, press Enter to skip, enter f to read a file, or p to paste multiple lines): ",
+    ))
+    if not value:
         return None
+    if "\x00" in value:
+        raise ValueError("publish notes must not contain NUL")
+    choice = value.lower()
     if choice == "f":
         path = Path(_prompt_stderr(ui_text("Markdown 文件路径: ", "Markdown file path: "))).expanduser()
         return _read_notes_file(path)
@@ -1107,7 +1156,27 @@ def _prompt_markdown_notes() -> str | None:
                 raise ValueError("publish notes must not contain NUL")
             lines.append(line)
         return "\n".join(lines).strip() or None
-    raise ValueError("NOTE input must be empty, f, or p")
+    return value
+
+
+def _prompt_series_initialization_mode() -> str:
+    print(ui_text(
+        "未找到 bgminfo/series.json，请选择初始化方式：",
+        "bgminfo/series.json was not found. Select an initialization method:",
+    ), file=sys.stderr)
+    print(ui_text(
+        "  1. 通过问答创建 series.json（默认）",
+        "  1. Create series.json through guided questions (default)",
+    ), file=sys.stderr)
+    print(ui_text(
+        "  2. 生成可手动填写的 series.template.json",
+        "  2. Generate series.template.json for manual editing",
+    ), file=sys.stderr)
+    value = _prompt_default(ui_text("请选择 1 或 2", "Select 1 or 2"), "1")
+    selected = {"1": "questions", "2": "template"}.get(value)
+    if selected is None:
+        raise ValueError("series initialization selection must be 1 or 2")
+    return selected
 
 
 def _prompt_transcription_mode(default: str = "full") -> str:
@@ -1197,10 +1266,27 @@ def _workstation_start(args: argparse.Namespace) -> dict[str, Any]:
     _ensure_ui_language()
     from .workstation import (
         execute_recommended_action, inspect_episode_stage, inspect_series_workspace,
-        prompt_series_metadata, resolve_series_root, write_series_metadata_template,
+        promote_series_metadata_template, prompt_series_metadata, resolve_series_root,
+        series_metadata_template_guide,
+        write_series_metadata_template,
     )
-    root = resolve_series_root(args.series_root)
-    print(ui_text(f"番组根目录: {root}", f"Series root: {root}"), file=sys.stderr)
+    launch_dir = (
+        Path.cwd() if args.series_root is None else Path(args.series_root).expanduser()
+    ).resolve()
+    root = resolve_series_root(launch_dir)
+    print(ui_text(f"工作区根目录: {root}", f"Workspace root: {root}"), file=sys.stderr)
+    promotion = promote_series_metadata_template(root)
+    if promotion is not None and promotion["status"] != "succeeded":
+        return {
+            "series_root": str(root),
+            "template_guide": series_metadata_template_guide(),
+            **promotion,
+        }
+    if promotion is not None:
+        print(ui_text(
+            f"已验证模板并生成: {promotion['metadata_path']}",
+            f"Validated template and created: {promotion['metadata_path']}",
+        ), file=sys.stderr)
     series = inspect_series_workspace(root)
     blocking_codes = {item.get("code") for item in series["blocking"]}
     if "series_metadata_missing" in blocking_codes:
@@ -1209,13 +1295,19 @@ def _workstation_start(args: argparse.Namespace) -> dict[str, Any]:
             return {
                 "status": "needs_review", "series_root": str(root),
                 "template_path": str(template),
-                "next_action": "complete_template_and_save_as_bgminfo/series.json",
+                "template_guide": series_metadata_template_guide(),
+                "next_action": "complete_template_and_rerun",
             }
         if sys.stdin.isatty():
-            print(ui_text(
-                "未找到 bgminfo/series.json，将进入问答初始化。",
-                "bgminfo/series.json was not found. Starting the setup wizard.",
-            ), file=sys.stderr)
+            initialization = _prompt_series_initialization_mode()
+            if initialization == "template":
+                template = write_series_metadata_template(root)
+                return {
+                    "status": "needs_review", "series_root": str(root),
+                    "template_path": str(template),
+                    "template_guide": series_metadata_template_guide(),
+                    "next_action": "complete_template_and_rerun",
+                }
             def start_input(prompt: str) -> str:
                 folder_labels = ("番组文件夹名", "Series folder name")
                 if prompt.startswith(folder_labels):
@@ -1269,6 +1361,14 @@ def _workstation_start(args: argparse.Namespace) -> dict[str, Any]:
             return series
     episodes = series["episodes"]
     episode_id = args.episode_id
+    if episode_id is None and launch_dir.name.isdigit():
+        launch_episode = next(
+            (item for item in episodes if Path(item["episode_dir"]) == launch_dir), None,
+        )
+        if launch_episode is not None:
+            episode_id = launch_episode["episode_id"]
+    if episode_id is None and len(episodes) == 1:
+        episode_id = episodes[0]["episode_id"]
     if episode_id is None:
         if not sys.stdin.isatty():
             return {
@@ -1296,13 +1396,24 @@ def _workstation_start(args: argparse.Namespace) -> dict[str, Any]:
         print(ui_text(f"依据: {json.dumps(evidence, ensure_ascii=False)}", f"Evidence: {json.dumps(evidence, ensure_ascii=False)}"), file=sys.stderr)
     for item in inspection["blocking"]:
         print(ui_text(f"阻断: {json.dumps(item, ensure_ascii=False)}", f"Blocker: {json.dumps(item, ensure_ascii=False)}"), file=sys.stderr)
+    if getattr(args, "command", None) == "ws" and inspection.get("detected_phase") in {
+        "local_production", "publish", "complete",
+    }:
+        return {
+            **inspection,
+            "status": "succeeded",
+            "executable": False,
+            "recommended_action": None,
+            "recommended_command": "bmlsub ws end",
+            "next_action": "ws_end",
+        }
     if inspection.get("recommended_action") == "run_publish":
         return {
             **inspection,
             "status": "succeeded",
             "executable": False,
             "recommended_action": None,
-            "recommended_command": "bmlsub workstation start delivery",
+            "recommended_command": "bmlsub ws end",
             "next_action": "start_delivery",
         }
     if not inspection["executable"]:
@@ -1433,8 +1544,20 @@ def _prompt_profile_values(kind: str, *, current: dict[str, Any] | None = None) 
 
 def _choose_or_create_profile(
     service: CredentialService, kind: str, *, preferred_alias: str | None = None,
+    reselect: bool = False,
 ) -> tuple[str, str]:
     profiles = [item for item in service.list_profiles()["profiles"] if item["kind"] == kind]
+    if not reselect:
+        preferred = next((
+            item for item in profiles
+            if item.get("alias") == preferred_alias and item.get("available")
+        ), None)
+        available = [item for item in profiles if item.get("available")]
+        selected = preferred or (available[0] if len(available) == 1 else None)
+        if selected is not None:
+            alias = str(selected["alias"])
+            service.validate_profile(alias)
+            return alias, "reused"
     if preferred_alias:
         profiles.sort(key=lambda item: item["alias"] != preferred_alias)
     actions = []
@@ -1451,8 +1574,10 @@ def _choose_or_create_profile(
             marker = ui_text("可用", "available") if profile.get("available") else ui_text("不可用", "unavailable")
             print(f"  {index}. {label} {profile['alias']} ({marker})", file=sys.stderr)
         print(ui_text(
-            f"  {len(actions) + 1}. 新建凭据配置",
-            f"  {len(actions) + 1}. Create a credential profile",
+            (f"  {len(actions) + 1}. 新建凭据配置（输入 qBittorrent 用户名和密码）"
+             if kind == "qbittorrent" else f"  {len(actions) + 1}. 新建凭据配置"),
+            (f"  {len(actions) + 1}. Create a credential profile (enter qBittorrent username and password)"
+             if kind == "qbittorrent" else f"  {len(actions) + 1}. Create a credential profile"),
         ), file=sys.stderr)
         selected = _prompt_default(ui_text("请选择序号", "Select a number"), "1")
         if selected.isdigit() and 1 <= int(selected) <= len(actions):
@@ -1479,7 +1604,55 @@ def _choose_or_create_profile(
     return alias, "created"
 
 
-def _configure_delivery_interactive(series_path: Path, manifest_path: Path | None) -> dict[str, Any]:
+def _delivery_public_values(
+    publish: dict[str, Any], resolved_ssh_alias: str, *, edit_existing: bool,
+) -> dict[str, Any]:
+    def value(key: str, zh: str, en: str, default: Any, *, required: bool = False) -> Any:
+        current = publish.get(key)
+        if not edit_existing and not required and current not in (None, ""):
+            return current
+        if not edit_existing and not required:
+            return default
+        return _prompt_default(ui_text(zh, en), str(current or default))
+
+    values = {
+        "r2_bucket": value("r2_bucket", "R2 存储桶", "R2 bucket", "bml"),
+        "r2_access": value("r2_access", "R2 访问级别", "R2 access level", "private"),
+        "rclone_remote": value(
+            "rclone_remote", "远程服务器 rclone remote 名称",
+            "Remote server rclone remote name", "r2",
+        ),
+        "ssh_alias": resolved_ssh_alias,
+        "remote_root": value(
+            "remote_root", "VPS 宿主机平铺目录", "Flat directory on the VPS host",
+            "/data/dcapp/qb/downloads", required=True,
+        ),
+        "qb_save_path": value(
+            "qb_save_path", "qBittorrent Docker 容器内对应目录",
+            "Matching directory inside the qBittorrent Docker container", "/downloads",
+        ),
+        "qb_port": int(value(
+            "qb_port", "qBittorrent WebUI 端口", "qBittorrent WebUI port", 8080,
+            required=True,
+        )),
+    }
+    values["qb_webui_origin"] = value(
+            "qb_webui_origin", "qBittorrent WebUI 来源地址",
+            "qBittorrent WebUI origin",
+            f"https://127.0.0.1:{values['qb_port']}", required=True,
+        )
+    from .release.external_profiles import QBittorrentSeedProfile
+    validated = QBittorrentSeedProfile(
+        ssh_alias=resolved_ssh_alias, port=values["qb_port"],
+        save_path=values["qb_save_path"], webui_origin=values["qb_webui_origin"],
+    )
+    values["qb_webui_origin"] = validated.webui_origin
+    return values
+
+
+def _configure_delivery_interactive(
+    series_path: Path, manifest_path: Path | None, *, edit_existing: bool = False,
+) -> dict[str, Any]:
     from .workstation import SeriesMetadata, update_series_publish_config
     service = CredentialService(manifest_path=manifest_path)
     initialized = service.initialize_manifest(
@@ -1492,8 +1665,10 @@ def _configure_delivery_interactive(series_path: Path, manifest_path: Path | Non
     aliases = {}
     for key, kind in (("r2", "r2"), ("ssh", "ssh"),
                       ("qbittorrent", "qbittorrent"), ("anibt", "anibt")):
+        preferred_alias = current_aliases.get(key)
         aliases[key], actions[key] = _choose_or_create_profile(
-            service, kind, preferred_alias=current_aliases.get(key),
+            service, kind, preferred_alias=preferred_alias,
+            reselect=edit_existing or not preferred_alias,
         )
     publish = dict(current.publish)
     resolved_ssh_alias, _ = service.resolve_ssh(aliases["ssh"])
@@ -1503,28 +1678,9 @@ def _configure_delivery_interactive(series_path: Path, manifest_path: Path | Non
             f"检测到 SSH 配置不一致：bmlsub 凭据配置“{aliases['ssh']}”解析为 OpenSSH Host 别名“{resolved_ssh_alias}”，而番组当前保存的是“{configured_ssh_alias}”。将使用解析后的 OpenSSH Host 别名作为默认值。",
             f"SSH configuration mismatch: bmlsub credential profile '{aliases['ssh']}' resolves to OpenSSH Host alias '{resolved_ssh_alias}', while the series currently stores '{configured_ssh_alias}'. The resolved OpenSSH Host alias will be used as the default.",
         ), file=sys.stderr)
-    values = {
-        "r2_bucket": _prompt_default(ui_text("R2 存储桶", "R2 bucket"), str(publish.get("r2_bucket", "bml"))),
-        "r2_access": _prompt_default(ui_text("R2 访问级别", "R2 access level"), str(publish.get("r2_access", "private"))),
-        "rclone_remote": _prompt_default(ui_text("远程服务器 rclone remote 名称", "Remote server rclone remote name"), str(publish.get("rclone_remote", "r2"))),
-        "ssh_alias": _prompt_default(ui_text(
-            "OpenSSH Host 别名（来自所选 SSH 凭据配置）",
-            "OpenSSH Host alias (from the selected SSH credential profile)",
-        ), resolved_ssh_alias),
-        "remote_root": _prompt_default(
-            ui_text("VPS 宿主机平铺目录", "Flat directory on the VPS host"),
-            str(publish.get("remote_root", "/data/dcapp/qb/downloads")),
-        ),
-        "qb_save_path": _prompt_default(
-            ui_text("qBittorrent Docker 容器内对应目录", "Matching directory inside the qBittorrent Docker container"),
-            str(publish.get("qb_save_path", "/downloads")),
-        ),
-        "qb_port": int(_prompt_default(ui_text("qBittorrent WebUI 端口", "qBittorrent WebUI port"), str(publish.get("qb_port", 8080)))),
-        "qb_webui_origin": _prompt_default(
-            ui_text("qBittorrent WebUI 来源地址", "qBittorrent WebUI origin"),
-            str(publish.get("qb_webui_origin", "http://127.0.0.1:8080")),
-        ),
-    }
+    values = _delivery_public_values(
+        publish, resolved_ssh_alias, edit_existing=edit_existing,
+    )
     summary = {
         "credential_manifest": initialized,
         "profiles": {key: {"alias": aliases[key], "action": actions[key]} for key in aliases},
@@ -1553,6 +1709,15 @@ def _delivery_credential_status(config: Any) -> dict[str, Any]:
         "qbittorrent": config.qb_credential_profile,
         "anibt": config.anibt_credential_profile,
     }
+    if service.manifest_path.exists():
+        try:
+            load_credential_manifest(service.manifest_path)
+        except ValueError as exc:
+            return {
+                "manifest": str(service.manifest_path),
+                "status": "invalid", "profiles": [],
+                "missing": list(aliases), "manifest_error": str(exc),
+            }
     profiles = []
     missing = []
     for kind, alias in aliases.items():
@@ -1578,6 +1743,12 @@ def _delivery_credential_status(config: Any) -> dict[str, Any]:
 def _print_delivery_credentials(status: dict[str, Any]) -> None:
     print(ui_text("凭据与钥匙串检查：", "Credential and Keychain check:"), file=sys.stderr)
     print(ui_text(f"  凭据清单: {status['manifest']}", f"  Credential manifest: {status['manifest']}"), file=sys.stderr)
+    if status.get("manifest_error"):
+        print(ui_text(
+            f"  凭据清单无效: {status['manifest_error']}",
+            f"  Invalid credential manifest: {status['manifest_error']}",
+        ), file=sys.stderr)
+        return
     for item in status["profiles"]:
         labels = {
             "available": ui_text("可复用", "reusable"),
@@ -1675,7 +1846,7 @@ def _workstation_start_delivery(args: argparse.Namespace) -> dict[str, Any]:
                 "code": "local_production_incomplete",
                 "message": "complete local production before starting file delivery",
             },
-            "recommended_command": "bmlsub workstation start",
+            "recommended_command": "bmlsub ws start",
             "next_action": "complete_local_production",
         }
     def effective_publish_config(explicit: PublishConfig | None = None) -> PublishConfig:
@@ -1696,6 +1867,17 @@ def _workstation_start_delivery(args: argparse.Namespace) -> dict[str, Any]:
     )
     credential_status = _delivery_credential_status(publish_config)
     _print_delivery_credentials(credential_status)
+    if credential_status["status"] == "invalid":
+        return {
+            "status": "needs_review", "inspection": inspection, "plan": plan,
+            "credentials": credential_status,
+            "error": {
+                "code": "credential_manifest_invalid",
+                "message": credential_status["manifest_error"],
+                "details": {"path": credential_status["manifest"]},
+            },
+            "next_action": "repair_credential_manifest",
+        }
     configure = args.configure or (credential_status["status"] != "succeeded" and not args.yes)
     if not configure and plan["status"] != "succeeded" and sys.stdin.isatty():
         configure = _confirm_stderr(ui_text(
@@ -1712,6 +1894,7 @@ def _workstation_start_delivery(args: argparse.Namespace) -> dict[str, Any]:
                     "next_action": "run_configuration_in_tty"}
         setup = _configure_delivery_interactive(
             Path(inspection["metadata_path"]), args.credential_manifest,
+            edit_existing=args.configure,
         )
         if setup["status"] != "succeeded":
             return setup
@@ -1800,8 +1983,21 @@ def _workstation_rebuild(args: argparse.Namespace) -> dict[str, Any]:
             "preprocess", "delivery", "validate_subtitles_fonts", "encode_hevc",
             "encode_hardsub_chs", "encode_hardsub_cht", "mux_subtitles", "create_torrents",
         )
+        target_labels = {
+            "preprocess": ui_text("完整预处理", "Full preprocess"),
+            "delivery": ui_text(
+                "完整本地生产（重新压制全部产品并重建 Torrent）",
+                "Full local production (re-encode all products and rebuild Torrents)",
+            ),
+            "validate_subtitles_fonts": ui_text("仅检查字幕与字体", "Validate subtitles and fonts only"),
+            "encode_hevc": ui_text("仅重新压制 HEVC", "Re-encode HEVC only"),
+            "encode_hardsub_chs": ui_text("仅重新压制简体 MP4", "Re-encode Simplified MP4 only"),
+            "encode_hardsub_cht": ui_text("仅重新压制繁体 MP4", "Re-encode Traditional MP4 only"),
+            "mux_subtitles": ui_text("仅重新封装简繁内封 MKV", "Re-mux bilingual MKV only"),
+            "create_torrents": ui_text("仅重新创建 Torrent", "Rebuild Torrents only"),
+        }
         for index, item in enumerate(targets, 1):
-            print(f"  {index}. {item}", file=sys.stderr)
+            print(f"  {index}. {item} - {target_labels[item]}", file=sys.stderr)
         selected = _prompt_stderr(ui_text("请选择序号或目标名称: ", "Select a number or enter a target name: "))
         target = (targets[int(selected) - 1]
                   if selected.isdigit() and 1 <= int(selected) <= len(targets)
@@ -1816,9 +2012,14 @@ def _workstation_rebuild(args: argparse.Namespace) -> dict[str, Any]:
         transcription = transcription or "full"
     confirmed = args.confirm_rebuild
     if not confirmed and sys.stdin.isatty():
-        confirmed = _confirm_stderr(
-            f"是否强制重建 {target}（保留历史，不执行发布）"
-        )
+        impact = (ui_text(
+            "将重新执行 HEVC、简体 MP4、繁体 MP4、MKV 封装和 Torrent 创建",
+            "HEVC, Simplified MP4, Traditional MP4, MKV muxing, and Torrent creation will all rerun",
+        ) if target == "delivery" else target)
+        confirmed = _confirm_stderr(ui_text(
+            f"是否强制重建 {target}（{impact}；保留历史，不执行外部发布）",
+            f"Force rebuild {target} ({impact}; preserve history and do not publish externally)",
+        ))
     return run_rebuild(
         plan, confirmed=confirmed, source_video=args.source_video,
         production_subtitle=args.production_subtitle,
@@ -2001,6 +2202,120 @@ def _show_run(args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
+def _compact_start_namespace(*, command: str, execute: bool) -> argparse.Namespace:
+    return argparse.Namespace(
+        command=command,
+        series_root=None,
+        episode_id=None,
+        init_template=False,
+        retry_traditionalization=False,
+        traditionalization_api_url="https://api.zhconvert.org/convert",
+        traditionalization_converter="Taiwan",
+        traditionalization_timeout=60,
+        execute=execute,
+        source_video=None,
+        reference_policy=None,
+        reference_stream_index=[],
+        audio_stream_index=None,
+        production_subtitle=None,
+        delivery_scope=None,
+        delivery_product=[],
+        delivery_torrents="selected",
+        transcription=None,
+        notes_file=None,
+        force=False,
+    )
+
+
+def _compact_ws_start(args: argparse.Namespace) -> dict[str, Any]:
+    return _workstation_start(_compact_start_namespace(command="ws", execute=False))
+
+
+def _compact_episode_selection(root: Path) -> str | None:
+    from .workstation import discover_episode_directories
+    episodes = discover_episode_directories(root)
+    launch = Path.cwd().resolve()
+    if launch.name.isdigit() and launch in episodes:
+        return launch.name
+    if len(episodes) == 1:
+        return episodes[0].name
+    if not sys.stdin.isatty():
+        return None
+    print(ui_text("可用单集目录:", "Available episode directories:"), file=sys.stderr)
+    for index, episode in enumerate(episodes, 1):
+        print(f"  {index}. {episode.name}  {episode}", file=sys.stderr)
+    selected = _prompt_stderr(ui_text(
+        "请选择序号或输入单集目录名: ",
+        "Select a number or enter an episode directory name: ",
+    ))
+    return (episodes[int(selected) - 1].name
+            if selected.isdigit() and 1 <= int(selected) <= len(episodes)
+            else selected)
+
+
+def _compact_ws_end(args: argparse.Namespace) -> dict[str, Any]:
+    from .workstation import inspect_episode_stage, resolve_series_root
+    root = resolve_series_root()
+    episode_id = _compact_episode_selection(root)
+    if episode_id is None:
+        return {
+            "status": "needs_review", "series_root": str(root),
+            "error": {"code": "episode_selection_required",
+                      "message": "select one episode in an interactive terminal"},
+            "next_action": "bmlsub ws end",
+        }
+    inspection = inspect_episode_stage(root, episode_id)
+    if inspection.get("detected_phase") not in {"local_production", "publish", "complete"}:
+        return {
+            "status": "needs_review", "inspection": inspection,
+            "error": {"code": "workstation_start_incomplete",
+                      "message": "formal subtitles and fonts must be ready before ws end"},
+            "next_action": "bmlsub ws start",
+        }
+
+    unattended = args.unattended == "yes"
+    local_result: dict[str, Any] | None = None
+    if inspection.get("detected_phase") == "local_production":
+        local_args = _compact_start_namespace(
+            command="ws_end_internal", execute=unattended,
+        )
+        local_args.series_root = root
+        local_args.episode_id = episode_id
+        local_result = _workstation_start(local_args)
+        if local_result.get("status") not in {"succeeded", "skipped"}:
+            return local_result
+        inspection = inspect_episode_stage(root, episode_id)
+        if inspection.get("detected_phase") not in {"publish", "complete"}:
+            return {
+                "status": "needs_review", "local": local_result,
+                "inspection": inspection, "next_action": "bmlsub ws end",
+            }
+
+    delivery_args = argparse.Namespace(
+        series_root=root,
+        episode_id=episode_id,
+        publish_config_json=None,
+        configure=False,
+        credential_manifest=None,
+        execute=unattended,
+        yes=unattended,
+        verbose_plan=False,
+        resume=True,
+        restart=False,
+        confirm_external_action=unattended,
+        force=False,
+    )
+    external_result = _workstation_start_delivery(delivery_args)
+    if local_result is not None:
+        external_result = {**external_result, "local_delivery": local_result}
+    return external_result
+
+
+def _compact_build(args: argparse.Namespace) -> dict[str, Any]:
+    from .workstation.commands import run_operation
+    return run_operation(args.operation, rebuild=bool(args.rebuild), directory=Path.cwd())
+
+
 def _exit_code(payload: dict[str, Any]) -> int:
     status = payload.get("status")
     if status == "needs_review":
@@ -2012,25 +2327,51 @@ def _exit_code(payload: dict[str, Any]) -> int:
     return 0
 
 
+def _human_workstation_output(args: argparse.Namespace) -> bool:
+    return (
+        getattr(args, "command", None) in {"workstation", "ws"}
+        and getattr(args, "workstation_command", getattr(args, "ws_command", None)) == "start"
+        and bool(getattr(sys.stdout, "isatty", lambda: False)())
+    )
+
+
+def _print_final_payload(args: argparse.Namespace, payload: dict[str, Any]) -> None:
+    if _human_workstation_output(args):
+        from .workstation_summary import format_workstation_summary
+        print(format_workstation_summary(payload, language=ui_language()))
+        return
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
+    args: argparse.Namespace | None = None
     try:
         args = parser.parse_args(argv)
         incidental = io.StringIO()
-        with redirect_stdout(incidental):
-            payload = args.handler(args)
+        from .progress import TerminalProgressReporter, progress_reporter
+        terminal_reporter = TerminalProgressReporter(sys.stderr)
+        with progress_reporter(terminal_reporter):
+            try:
+                with redirect_stdout(incidental):
+                    payload = args.handler(args)
+            finally:
+                terminal_reporter.close()
         if incidental.getvalue():
             print(incidental.getvalue(), end="", file=sys.stderr)
         for diagnostic in payload.get("diagnostics", []):
             print(json.dumps(diagnostic, ensure_ascii=False), file=sys.stderr)
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        _print_final_payload(args, payload)
         return _exit_code(payload)
     except BmlsubError as exc:
         payload = {
             "status": "failed",
             "error": exc.to_dict(),
         }
-        print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
+        if args is not None and _human_workstation_output(args):
+            _print_final_payload(args, payload)
+        else:
+            print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
         return _exit_code(payload)
     except Exception as exc:
         payload = {
@@ -2040,7 +2381,10 @@ def main(argv: list[str] | None = None) -> int:
                 "retryable": False, "details": {"exception_type": type(exc).__name__},
             },
         }
-        print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
+        if args is not None and _human_workstation_output(args):
+            _print_final_payload(args, payload)
+        else:
+            print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
         return 1
 
 

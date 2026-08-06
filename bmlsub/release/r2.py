@@ -6,8 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 from urllib.request import Request, urlopen
+import threading
 
 from ..execution.errors import BmlsubError, ErrorCode
+from ..interactive import ui_text
+from ..progress import get_progress_reporter, get_progress_task, ProgressEvent
 from .credentials import R2Credentials
 from .external_profiles import R2UploadProfile
 
@@ -76,11 +79,30 @@ class Boto3R2Client:
             multipart_chunksize=profile.multipart_chunk_size,
             max_concurrency=profile.max_concurrency,
         )
+        total = source.stat().st_size
+        transferred = 0
+        transfer_lock = threading.Lock()
+        reporter = get_progress_reporter()
+        task = get_progress_task()
+
+        def progress(bytes_amount: int) -> None:
+            nonlocal transferred
+            with transfer_lock:
+                transferred = min(total, transferred + max(0, int(bytes_amount)))
+                current = transferred
+            if task is not None:
+                task.update(current=current, total=total, unit="bytes")
+            else:
+                reporter.report(ProgressEvent(
+                    phase="publish", step=f"release.upload_r2.bytes.{profile.object_key}",
+                    label=ui_text("R2 上传", "R2 upload"), state="running",
+                    current=current, total=total, unit="bytes", detail=source.name,
+                ))
         try:
             self.client.upload_file(
                 str(source), profile.bucket, profile.object_key,
                 ExtraArgs={"ContentType": profile.content_type, "Metadata": dict(metadata)},
-                Config=config,
+                Config=config, Callback=progress,
             )
         except Exception as exc:
             raise _provider_error("R2 upload failed", exc) from exc

@@ -12,6 +12,7 @@ import os
 import re
 import tempfile
 
+from ..platform.filesystem import fsync_directory, fsync_file
 from ..hanvert import ConverterProvider, convert_plain_text
 from ..interactive import default_prompt, optional_prompt, ui_text
 
@@ -21,6 +22,32 @@ from ..release.profiles import TorrentProfile
 
 
 SERIES_SCHEMA_VERSION = "bmlsub-series-v1"
+_TEMPLATE_TITLE_CHS = "请替换为简体中文番名（必填）"
+_TEMPLATE_ROMANIZED_TITLE = "ReplaceWithRomanizedTitle_REQUIRED"
+_TEMPLATE_GROUP_CHS = "请替换为简体制作组名（必填）"
+_TEMPLATE_REQUIRED_FIELDS = (
+    "series.title_chs", "series.romanized_title", "groups.chs",
+)
+_TEMPLATE_PLACEHOLDERS = {
+    "series.title_chs": frozenset({_TEMPLATE_TITLE_CHS, "请填写简体中文番名"}),
+    "series.romanized_title": frozenset({_TEMPLATE_ROMANIZED_TITLE, "PleaseFillRomanizedTitle"}),
+    "groups.chs": frozenset({_TEMPLATE_GROUP_CHS, "请填写简体制作组名"}),
+}
+_LEGACY_REQUIRED_FIELD_DESCRIPTIONS = {
+    "series.title_chs": "必填：简体中文作品名",
+    "series.romanized_title": "必填：用于发布文件名的罗马音作品名",
+    "groups.chs": "必填：简体制作组名",
+}
+_TEMPLATE_PUBLISH_DEFAULTS = {
+    "r2_bucket": "bml",
+    "r2_access": "private",
+    "rclone_remote": "r2",
+    "qb_port": 8080,
+    "qb_save_path": "/downloads",
+    "qb_webui_origin": "https://127.0.0.1:8080",
+    "notes": "",
+    "credential_aliases": {},
+}
 _SECRET_MARKERS = (
     "password", "passwd", "secret", "token", "access_key", "private_key",
     "authorization", "cookie", "api_key", "apikey",
@@ -38,6 +65,51 @@ _SERIES_QUESTIONS = (
     {"key": "bgm_id", "zh": "Bangumi ID", "en": "Bangumi ID", "required": False},
     {"key": "anime_id", "zh": "Anime ID", "en": "Anime ID", "required": False},
     {"key": "production", "zh": "Production JSON", "en": "Production JSON", "required": False, "default": "{}"},
+)
+_SERIES_TEMPLATE_FIELDS = (
+    {
+        "path": "series.title_chs", "required": True,
+        "zh": "简体中文番名", "en": "Simplified Chinese series title",
+    },
+    {
+        "path": "series.title_cht", "required": False,
+        "zh": "繁体中文番名；为 null 时可由 Taiwan 转换器生成",
+        "en": "Traditional Chinese title; null allows Taiwan conversion",
+    },
+    {
+        "path": "series.romanized_title", "required": True,
+        "zh": "用于发布文件名的罗马音番名",
+        "en": "Romanized title used in release filenames",
+    },
+    {
+        "path": "series.bgm_id", "required": False,
+        "zh": "正整数 Bangumi 条目 ID；发布时 bgm_id/anime_id 至少填写一个",
+        "en": "Positive Bangumi subject ID; publication requires bgm_id or anime_id",
+    },
+    {
+        "path": "series.anime_id", "required": False,
+        "zh": "Anibt 使用的非空 Anime ID；发布时 bgm_id/anime_id 至少填写一个",
+        "en": "Non-empty Anibt Anime ID; publication requires bgm_id or anime_id",
+    },
+    {
+        "path": "groups.chs", "required": True,
+        "zh": "简体制作组名", "en": "Simplified Chinese release group name",
+    },
+    {
+        "path": "groups.cht", "required": False,
+        "zh": "繁体制作组名；为 null 时可由 Taiwan 转换器生成",
+        "en": "Traditional release group name; null allows Taiwan conversion",
+    },
+    {
+        "path": "production", "required": False,
+        "zh": "压制、ASS 检查和 Torrent profile；不确定时保留默认值",
+        "en": "Encoding, ASS analysis, and Torrent profiles; keep defaults if unsure",
+    },
+    {
+        "path": "publish", "required": False,
+        "zh": "非敏感发布配置和凭据别名；不得在此保存密码或 token",
+        "en": "Non-secret publish settings and credential aliases; never store secrets here",
+    },
 )
 
 
@@ -294,7 +366,7 @@ def _atomic_write_series(path: Path, data: bytes, *, replace: bool) -> None:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
             handle.flush()
-            os.fsync(handle.fileno())
+            fsync_file(handle)
         if replace:
             os.replace(temporary, path)
         else:
@@ -303,11 +375,7 @@ def _atomic_write_series(path: Path, data: bytes, *, replace: bool) -> None:
             except FileExistsError as exc:
                 raise FileExistsError(f"series metadata already exists: {path}") from exc
             temporary.unlink()
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        fsync_directory(path.parent)
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -370,38 +438,76 @@ class SeriesMetadata:
         }
 
 
-def series_metadata_template() -> dict[str, Any]:
-    """Return a non-secret template that must be completed before use."""
-    return {
+def _new_series_payload(
+    *, title_chs: str, romanized_title: str, group_chs: str,
+    title_cht: str | None = None, group_cht: str | None = None,
+    bgm_id: int | None = None, anime_id: str | None = None,
+    production: Mapping[str, Any] | None = None,
+    publish: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the one canonical normalized payload used by wizard and template."""
+    return _normalize_payload({
         "schema_version": SERIES_SCHEMA_VERSION,
         "series": {
-            "title_chs": "请填写简体中文番名",
-            "title_cht": None,
-            "romanized_title": "PleaseFillRomanizedTitle",
-            "bgm_id": None,
-            "anime_id": None,
+            "title_chs": title_chs,
+            "title_cht": title_cht,
+            "romanized_title": romanized_title,
+            "bgm_id": bgm_id,
+            "anime_id": anime_id,
             "traditionalization": {
-                "status": "pending", "converter": "Taiwan",
-                "api_url": "https://api.zhconvert.org/convert", "attempts": {},
+                "status": "resolved" if title_cht and group_cht else "pending",
+                "converter": "Taiwan",
+                "api_url": "https://api.zhconvert.org/convert",
+                "attempts": {},
             },
         },
-        "groups": {
-            "chs": "请填写简体制作组名",
-            "cht": None,
+        "groups": {"chs": group_chs, "cht": group_cht},
+        "production": dict(production or {}),
+        "publish": dict(publish or {}),
+    })
+
+
+def series_metadata_template() -> dict[str, Any]:
+    """Return an annotated template with the same defaults as guided creation."""
+    payload = _new_series_payload(
+        title_chs=_TEMPLATE_TITLE_CHS,
+        romanized_title=_TEMPLATE_ROMANIZED_TITLE,
+        group_chs=_TEMPLATE_GROUP_CHS,
+        publish=_TEMPLATE_PUBLISH_DEFAULTS,
+    )
+    return {
+        "_template": {
+            "do_not_edit": True,
+            "comment": (
+                "本说明区只列出规则，请勿在这里填写内容。请修改下方 series、groups、"
+                "production 和 publish 中的实际字段；required_fields 是必须填写的字段路径。完成后再运行 "
+                "bmlsub ws start，程序会验证并自动生成 series.json。"
+            ),
+            "required_fields": list(_TEMPLATE_REQUIRED_FIELDS),
+            "optional_fields": {
+                "series.title_cht": "可留为 null，后续自动转换",
+                "groups.cht": "可留为 null，后续自动转换",
+                "series.bgm_id": "发布时与 series.anime_id 至少填写一个",
+                "production": "已按问答创建逻辑填入默认值；不确定时保持不变",
+                "publish.ssh_alias": "后续 delivery 向导从 OpenSSH 配置解析",
+                "publish.remote_root": "后续 delivery 向导填写 VPS 宿主机目录",
+                "publish.credential_aliases": "后续 delivery 向导选择或创建，不得在模板写入 Secret",
+            },
         },
-        "production": {
-            "hardsub_parameters": {},
-            "hevc_parameters": {},
-            "ass_profile": {},
-            "torrent_profile": {"format": "v1"},
-        },
-        "publish": {
-            "r2_bucket": "bml",
-            "r2_access": "private",
-            "rclone_remote": "r2",
-            "qb_port": 8080,
-            "qb_save_path": "/downloads",
-            "credential_aliases": {},
+        **payload,
+    }
+
+
+def series_metadata_template_guide() -> dict[str, Any]:
+    """Return field meanings separately so the template remains strict JSON schema data."""
+    fields = tuple(dict(item) for item in _SERIES_TEMPLATE_FIELDS)
+    return {
+        "schema_version": SERIES_SCHEMA_VERSION,
+        "required_fields": [item["path"] for item in fields if item["required"]],
+        "fields": [dict(item) for item in fields],
+        "instructions": {
+            "zh": "填写模板后再运行 bmlsub ws start；验证通过后会自动生成 bgminfo/series.json。不要写入密码、token 或密钥。",
+            "en": "Complete the template and rerun bmlsub ws start; validation promotes it to bgminfo/series.json automatically. Do not store passwords, tokens, or keys in it.",
         },
     }
 
@@ -418,6 +524,121 @@ def write_series_metadata_template(series_root: Path | str, *, replace: bool = F
     return target
 
 
+def promote_series_metadata_template(series_root: Path | str) -> dict[str, Any] | None:
+    """Validate and atomically promote a completed template to live metadata."""
+    root = Path(series_root).expanduser().resolve()
+    template = root / "bgminfo" / "series.template.json"
+    target = root / "bgminfo" / "series.json"
+    if target.is_file() or not template.is_file():
+        return None
+    try:
+        payload = json.loads(template.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return _template_review(template, error=f"template is unreadable or invalid JSON: {exc}")
+    if not isinstance(payload, Mapping):
+        return _template_review(template, error="template must contain a JSON object")
+    candidate = dict(payload)
+    _recover_legacy_template_values(candidate)
+    candidate.pop("_template", None)
+    missing = _template_missing_fields(candidate)
+    if missing:
+        return _template_review(template, missing=missing)
+    try:
+        normalized = _normalize_payload(candidate)
+        _atomic_write_series(
+            target, _serialized_payload(normalized), replace=False,
+        )
+    except (OSError, ValueError) as exc:
+        return _template_review(template, error=str(exc))
+    cleanup_warning = None
+    try:
+        template.unlink()
+        fsync_directory(template.parent)
+    except OSError as exc:
+        cleanup_warning = f"live metadata was created but the template could not be removed: {exc}"
+    metadata = SeriesMetadata.load(target)
+    result = {
+        "status": "succeeded",
+        "promoted": True,
+        "template_removed": not template.exists(),
+        "template_path": str(template),
+        "metadata_path": str(target),
+        "metadata": metadata.to_dict(),
+    }
+    if cleanup_warning:
+        result["warning"] = cleanup_warning
+    return result
+
+
+def _template_missing_fields(payload: Mapping[str, Any]) -> list[str]:
+    series = payload.get("series")
+    groups = payload.get("groups")
+    series = series if isinstance(series, Mapping) else {}
+    groups = groups if isinstance(groups, Mapping) else {}
+    required = (
+        ("series.title_chs", series.get("title_chs")),
+        ("series.romanized_title", series.get("romanized_title")),
+        ("groups.chs", groups.get("chs")),
+    )
+    return [
+        path for path, value in required
+        if not isinstance(value, str) or not value.strip()
+        or value.strip() in _TEMPLATE_PLACEHOLDERS[path]
+    ]
+
+
+def _recover_legacy_template_values(payload: dict[str, Any]) -> None:
+    """Recover values entered into the editable-looking annotation in older templates."""
+    annotation = payload.get("_template")
+    if not isinstance(annotation, Mapping):
+        return
+    if annotation.get("do_not_edit") is True:
+        return
+    legacy_values = annotation.get("required_fields")
+    if not isinstance(legacy_values, Mapping):
+        return
+    if set(legacy_values) != set(_TEMPLATE_REQUIRED_FIELDS):
+        return
+
+    containers = {
+        "series": payload.get("series"),
+        "groups": payload.get("groups"),
+    }
+    for path in _TEMPLATE_REQUIRED_FIELDS:
+        legacy_value = legacy_values.get(path)
+        if not isinstance(legacy_value, str) or not legacy_value.strip():
+            continue
+        value = legacy_value.strip()
+        if value == _LEGACY_REQUIRED_FIELD_DESCRIPTIONS[path]:
+            continue
+        container_name, field_name = path.split(".", 1)
+        container = containers[container_name]
+        if not isinstance(container, dict):
+            continue
+        current = container.get(field_name)
+        if (not isinstance(current, str) or not current.strip()
+                or current.strip() in _TEMPLATE_PLACEHOLDERS[path]):
+            container[field_name] = value
+
+
+def _template_review(
+    template: Path, *, missing: list[str] | None = None, error: str | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "needs_review",
+        "promoted": False,
+        "template_path": str(template),
+        "missing_required_fields": list(missing or ()),
+        "next_action": "complete_template_and_rerun",
+    }
+    if error:
+        result["error"] = {
+            "code": "series_template_invalid", "message": error,
+            "retryable": False,
+        }
+    return result
+
+
 def create_series_metadata(
     series_folder_name: str, *, parent_dir: Path | str | None = None,
     title_chs: str, title_cht: str | None = None, romanized_title: str = "",
@@ -427,22 +648,13 @@ def create_series_metadata(
 ) -> SeriesMetadata:
     """Create one strictly validated series.json and return its loaded metadata."""
     folder_name = _series_folder_name(series_folder_name)
-    payload = _normalize_payload({
-        "schema_version": SERIES_SCHEMA_VERSION,
-        "series": {
-            "title_chs": title_chs, "title_cht": title_cht,
-            "romanized_title": romanized_title, "bgm_id": bgm_id,
-            "anime_id": anime_id,
-            "traditionalization": {
-                "status": "resolved" if title_cht and group_cht else "pending",
-                "converter": "Taiwan",
-                "api_url": "https://api.zhconvert.org/convert",
-                "attempts": {},
-            },
-        },
-        "groups": {"chs": group_chs, "cht": group_cht},
-        "production": dict(production or {}), "publish": dict(publish or {}),
-    })
+    payload = _new_series_payload(
+        title_chs=title_chs, title_cht=title_cht,
+        romanized_title=romanized_title,
+        group_chs=group_chs, group_cht=group_cht,
+        bgm_id=bgm_id, anime_id=anime_id,
+        production=production, publish=publish,
+    )
     parent = (Path.home() / "Downloads" if parent_dir is None
               else Path(parent_dir).expanduser()).resolve()
     target = parent / folder_name / "bgminfo" / "series.json"
@@ -553,6 +765,7 @@ class SeriesContext:
     episode_dir: Path
     episode_id: str
     metadata: SeriesMetadata
+    workspace_layout: str = "series_episode"
 
     @property
     def series_folder_name(self) -> str:
@@ -563,6 +776,7 @@ class SeriesContext:
             "root": str(self.series_root), "folder_name": self.series_folder_name,
             "metadata_path": str(self.metadata.path), "metadata_hash": self.metadata.content_hash,
             "episode_dir": str(self.episode_dir), "episode_id": self.episode_id,
+            "workspace_layout": self.workspace_layout,
         }
 
 
@@ -572,14 +786,23 @@ def discover_series_context(episode_dir: Path | str) -> SeriesContext:
         raise ValueError("episode directory does not exist")
     if not episode.name.isdigit():
         raise ValueError("episode directory name must contain digits only")
-    series_root = episode.parent
-    metadata_path = series_root / "bgminfo" / "series.json"
+    local_metadata = episode / "bgminfo" / "series.json"
+    if local_metadata.is_file():
+        series_root = episode
+        metadata_path = local_metadata
+        layout = "standalone_episode"
+    else:
+        series_root = episode.parent
+        metadata_path = series_root / "bgminfo" / "series.json"
+        layout = "series_episode"
     if not metadata_path.is_file():
-        raise ValueError("episode direct parent has no bgminfo/series.json")
+        raise ValueError("episode workspace has no local or parent bgminfo/series.json")
     folder_name = series_root.name
     if not folder_name or any(character in folder_name for character in ("/", "\\", "\x00")):
         raise ValueError("series folder name is invalid")
-    return SeriesContext(series_root, episode, episode.name, SeriesMetadata.load(metadata_path))
+    return SeriesContext(
+        series_root, episode, episode.name, SeriesMetadata.load(metadata_path), layout,
+    )
 
 
 def try_discover_series_context(episode_dir: Path | str) -> SeriesContext | None:

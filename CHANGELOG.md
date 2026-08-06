@@ -2,6 +2,52 @@
 
 All notable changes to `bmlsub` are recorded here.
 
+## 1.2.1 - 2026-08-06
+
+### Compact CLI and standalone operations
+
+- Replace the public command surface with `ws start`, `ws end`, `ws end yes`,
+  `build [option]`, and `rebuild [option]`.
+- Add one canonical registry for Bgminfo, Ensub, Trans, Pubinfo, Encode,
+  Torrent, Upr2, Dlvps, Seed, and Anibt.
+- Add safe non-recursive input discovery, immutable standalone plans and
+  receipts, a SQLite operation journal, and recoverable local rebuild backups.
+- Keep standalone operations isolated and refuse `rebuild anibt` before any
+  external action.
+
+## 1.2.0 — 2026-08-05
+
+### Workstation reliability
+
+- Match fast-mode completion inspection to the publication receipt keys actually written for remote content and Torrent pulls.
+- Validate registered product, Torrent, and publication receipt Artifacts against current SQLite state and files before recommending publication or reporting completion.
+- Restore preprocess policy and reference selection from the current phase plan and manifest while preserving saved audio and Whisper-job choices across delivery runs.
+
+### Operator experience
+
+- Show a concise completed/reused/failed/pending/next-action summary for Workstation fast mode in a TTY while preserving one JSON document on non-TTY stdout.
+- Add TTY-only progress for MLX transcription, encoding and muxing, Torrent creation, R2 upload, VPS synchronization, qBittorrent seeding, and Anibt publication; suppress dynamic progress for non-TTY automation.
+- Treat mkvmerge exit code 1 as a completed mux with warnings and preserve the warning in the Stage diagnostic.
+- Add `workstation start --init-template` with required-field annotations, workflow-derived Production/Publish defaults, and automatic validated promotion from `series.template.json` to `series.json`.
+- Recommend a dedicated Conda `bmlsub` environment with Python 3.12 while retaining Python 3.10+ compatibility.
+
+### Delivery and publication correctness
+
+- Preserve inherited preprocess and ASS configuration when later phases update the state snapshot.
+- Use the inherited ASS profile during full delivery and validate the generated CHT publication copy before consuming its output.
+- Require an Anibt/Bangumi identity before publication and use an HTTPS qBittorrent WebUI origin by default.
+
+### Portability foundation
+
+- Add platform-neutral file locking, durable writes, secret storage, capability reporting, and executable discovery boundaries.
+- Avoid unconditional POSIX-only imports and support validated system keyring backends while retaining macOS Keychain compatibility.
+- Move MLX Whisper out of the portable core dependency set into a macOS transcription option.
+
+### Verification
+
+- Add regression coverage for receipt compatibility, Artifact drift, preprocess recovery, configuration preservation, publication identity, platform services, and non-ASCII paths.
+- Validate discovery, planning, registration, drift detection, validators, and CLI behavior in a temporary workspace built from the real episode-04 fixture; no source fixture or external publication target is modified.
+
 ## 1.1.5 — 2026-07-24
 
 ### Workstation reference subtitles

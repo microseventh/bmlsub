@@ -112,11 +112,18 @@ def transcription_jobs_for_mode(mode: str) -> tuple[TranscriptionJob, ...]:
     if normalized == "none":
         return ()
     if normalized == "quick":
-        return (TranscriptionJob(name="direct", mode="direct"),)
+        return (TranscriptionJob(
+            name="direct", mode="direct", model="mlx-community/whisper-medium-mlx",
+        ),)
     if normalized == "full":
         return (
-            TranscriptionJob(name="direct", mode="direct"),
-            TranscriptionJob(name="chunked", mode="chunked"),
+            TranscriptionJob(
+                name="direct", mode="direct", model="mlx-community/whisper-medium-mlx",
+            ),
+            TranscriptionJob(
+                name="chunked", mode="chunked",
+                model="mlx-community/whisper-large-v3-turbo",
+            ),
         )
     raise ValueError("transcription mode must be quick, full, or none")
 

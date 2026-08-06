@@ -1,41 +1,55 @@
-# CLI reference
+# CLI 参考
 
-[中文](zh/cli.md) · [Documentation home](../README.md)
-
-The exact parser is `bmlsub.cli.build_parser()`. Stdout is one final JSON document; incidental output goes to stderr. Exit codes are 0 for ordinary success/reuse, 1 for failed/error payloads, and 2 for `needs_review`.
-
-Command paths:
+## 公开命令
 
 ```text
-episode validate
-asset register-video | register-subtitle | register-font | register-chapter | register-attachment
-asset match | confirm | manifest | show | list
-media tracks | extract-audio | extract-subtitle | extract-attachments
-subtitle analyze-ass | normalize-ass | reconstruct-ass
-transcribe
-production create | show | list | execute
-credentials import-json | upsert-secret | list | get | create | update | delete | status | validate | probe
-release create-torrent | upload-r2 | pull-remote | seed-qbittorrent | publish-anibt
-workstation start | rebuild | preprocess | delivery | publish | status
-run show
+usage: bmlsub [-h] [--version] {ws,build,rebuild} ...
 ```
 
-Implemented details:
+顶层命令只有：
 
-- episode conversion defaults to Taiwan/zhconvert/60 seconds; whole-file mode is explicit; the no-fallback flag is deprecated compatibility.
-- video registration requires one or more purposes. Media commands require exactly one of video Artifact ID or purpose.
-- audio extraction defaults to `both`; transcription defaults to direct, large-v3-turbo/main/ja, 240-second chunks and 5-second overlap.
-- ASS commands require registered subtitle or analysis Artifact IDs and JSON-object Profiles.
-- Production create accepts only encode, hardsub, or mux_subtitle and the four matching output Profiles. Execute defaults to ffmpeg/ffprobe/mkvmerge and a 7200-second process timeout.
-- Credential secret files must pass secure-file validation. Delete and probe require explicit confirmation flags.
-- External release commands require `--confirm-external-action`; local torrent creation does not.
-- Workstation has three user-facing entry points: interactive fast mode `bmlsub workstation start`, interactive external delivery `bmlsub workstation start delivery`, and unattended external delivery `bmlsub workstation start delivery -y`. An interactive TTY first asks for 中文 or English; pressing Enter explicitly selects Chinese. The selected language is used consistently for the rest of that invocation. Prompts with defaults state `Press Enter to use the default: ...`; non-interactive JSON output and machine-readable status fields are unchanged.
-- `workstation start delivery` performs local credential/path/input checks, prints a concise summary, and confirms product actions in R2 → VPS pull → qB seed → Anibt order. `--verbose-plan` prints complete file mappings; `--configure` opens the credential wizard even when the plan is otherwise complete.
-- `-y/--yes` skips delivery prompts and uses existing validated configuration. It preserves Stage fingerprint and receipt reuse and is not equivalent to `--force`. Missing or invalid credentials return `needs_review`. `--resume` and `--restart` express recovery intent without deleting external resources.
-- Series creation asks only for Simplified title/group names by default. Traditional values are produced with the Taiwan conversion provider. A failure is atomically recorded as pending state in `series.json`; retry with `workstation series retry-traditionalization --series-root PATH`. Pending names block production naming but do not require re-entering the source text.
-- Workstation preprocess discovers one top-level source, extracts every matching supported English text-subtitle track and Japanese audio, and can run configured Whisper jobs. `all-matching` is the default reference policy; repeated `--reference-stream-index` values with `--reference-policy explicit` select a subset. Stream-indexed working copies coexist with a primary/default compatibility copy. Quick/full/none status is computed from the current plan, and incomplete preprocessing resumes before physical reference files can trigger human handoff. Delivery excludes all registered reference paths, inherits release names and Production Profiles from the direct parent `bgminfo/series.json`, and treats explicit CLI values as episode overrides. Full delivery validates the CHS ASS/Aegisub-font handoff, creates CHS/CHT snapshots, records non-blocking font diagnostics, and builds the selected products and torrents.
-- `workstation delivery --step` performs a real single step. Choices are `validate_subtitles_fonts`, `encode_hevc`, `encode_hardsub_chs`, `encode_hardsub_cht`, `mux_subtitles`, and `create_torrents`; `all`/`delivery` run the full flow. A single step consumes prerequisite Artifact IDs already recorded in `manifest.json` and never runs the full delivery implicitly.
-- Publish returns `awaiting_confirmation` until `--confirm-external-action` is present. Workstation state always lives below `<episode>/workstation/state`; readable snapshots include resolved config/manifest/summary and may include redacted `credentials-status.json` and a scoped `release-batch.json`.
-- Run show is read-only.
+```text
+bmlsub ws start
+bmlsub ws end [yes]
+bmlsub build [option]
+bmlsub rebuild [option]
+```
 
-See the Chinese reference for the complete per-command required/default/choice tables; both are derived from the same parser.
+`option` 必须是 `bgminfo`、`ensub`、`trans`、`pubinfo`、`encode`、`torrent`、
+`upr2`、`dlvps`、`seed`、`anibt` 之一。`bmlsub ws start` 没有业务参数；
+`bmlsub ws end` 的可选位置参数只有 `yes`。`build` 和 `rebuild` 的 option
+来自同一份注册表。
+
+## 帮助与退出码
+
+```bash
+bmlsub --help
+bmlsub ws end --help
+bmlsub build --help
+bmlsub rebuild --help
+```
+
+非 TTY 的 `build`/`rebuild` 菜单返回 `needs_review`，不创建状态。JSON 输出只写 stdout；进度和诊断写 stderr。
+
+退出码：
+
+- `0`：成功、复用、等待确认或普通阻断。
+- `1`：失败或拒绝操作。
+- `2`：`needs_review` 或 parser 用法错误。
+
+旧命令组（`workstation`、`credentials`、`release` 等）和业务 flag 已从公开 parser 删除；它们会在进入状态或网络层前被拒绝。
+
+## Option 对照表
+
+| Option | 英文全称 | 中文含义 | 主要职责 | 外部动作 | 可 rebuild |
+| --- | --- | --- | --- | --- | --- |
+| `bgminfo` | Bangumi Information | 番组信息 | 创建或验证番组元数据 | 否 | 是 |
+| `ensub` | English Subtitle Extraction | 英文参考字幕提取 | 从视频提取文本参考字幕 | 否 | 是 |
+| `trans` | Transcription | 音频提取与转录 | 提取音频并运行 Whisper | 否 | 是 |
+| `pubinfo` | Publication Information | 发布信息配置 | 保存非敏感发布参数与凭据引用 | 否 | 是 |
+| `encode` | Encode | 视频编码与封装 | 转码、字幕内嵌或字幕/字体内封 | 否 | 是 |
+| `torrent` | Torrent Creation | Torrent 创建 | 为现有内容生成 Torrent | 否 | 是 |
+| `upr2` | Upload to R2 | 上传至 R2 | 上传内容并登记 R2 回执 | 是 | 是 |
+| `dlvps` | Download to VPS | 下载到 VPS | 根据 R2 回执将文件拉取到 VPS | 是 | 是 |
+| `seed` | Torrent Seeding | Torrent 做种 | 让 qBittorrent 校验内容并做种 | 是 | 是 |
+| `anibt` | Anibt Publication | Anibt 发布 | 使用 Torrent 发布 Anibt 条目 | 是 | 否 |

@@ -184,6 +184,21 @@ class StageRunner:
                 outcome.diagnostics, started_at, started_clock,
                 needs_review=stored.needs_review,
             )
+        except KeyboardInterrupt:
+            diagnostic = Diagnostic(
+                code=ErrorCode.INTERRUPTED.value,
+                message="stage was interrupted by the operator",
+                level=DiagnosticLevel.WARNING,
+            )
+            self.store.fail_stage(
+                stage.stage_id, ErrorCode.INTERRUPTED.value, retryable=True,
+                diagnostics=(diagnostic,),
+            )
+            self.store.finish_run(
+                run.run_id, RunStatus.INTERRUPTED,
+                error_code=ErrorCode.INTERRUPTED.value,
+            )
+            raise
         except ReviewRequiredError as exc:
             diagnostic = self._diagnostic_from_error(exc)
             stored = self.store.require_review(

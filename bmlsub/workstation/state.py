@@ -9,6 +9,7 @@ import json
 import os
 import tempfile
 
+from ..platform.filesystem import fsync_directory, fsync_file
 from ..state.models import ArtifactRecord, StageResult
 from ..state.sqlite_store import SQLiteJobStore
 from .common import ensure_directories
@@ -39,13 +40,9 @@ def atomic_write_json(path: Path | str, payload: Mapping[str, Any] | list[Any]) 
             json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
             handle.write("\n")
             handle.flush()
-            os.fsync(handle.fileno())
+            fsync_file(handle)
         os.replace(temporary_name, target)
-        directory = os.open(target.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        fsync_directory(target.parent)
     finally:
         temporary = Path(temporary_name)
         if temporary.exists():

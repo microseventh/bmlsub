@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-import fcntl
 import json
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
-from .keychain import MacOSKeychainSecretStore, SecretStore
+from ..platform.locks import file_lock
+from .keychain import SecretStore, default_secret_store
 from .manifest import (
     _atomic_write_manifest,
     load_credential_manifest,
@@ -74,7 +74,7 @@ class CredentialService:
         self.reference_checker = reference_checker
 
     def _store(self) -> SecretStore:
-        return self.secret_store or MacOSKeychainSecretStore()
+        return self.secret_store or default_secret_store()
 
     def _ssh(self) -> SSHConfigResolver:
         return self.ssh_resolver or SSHConfigResolver()
@@ -95,21 +95,16 @@ class CredentialService:
         manifest = CredentialManifest(namespace=namespace, profiles={})
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.manifest_path.with_name(f".{self.manifest_path.name}.lock")
-        with lock_path.open("a+") as handle:
-            lock_path.chmod(0o600)
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                if self.manifest_path.exists():
-                    current = self._manifest()
-                    return {
-                        "status": "skipped", "reused": True,
-                        "manifest": str(self.manifest_path),
-                        "namespace": current.namespace,
-                        "keychain_service": current.keychain_service(),
-                    }
-                _atomic_write_manifest(self.manifest_path, manifest)
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with file_lock(lock_path):
+            if self.manifest_path.exists():
+                current = self._manifest()
+                return {
+                    "status": "skipped", "reused": True,
+                    "manifest": str(self.manifest_path),
+                    "namespace": current.namespace,
+                    "keychain_service": current.keychain_service(),
+                }
+            _atomic_write_manifest(self.manifest_path, manifest)
         return {
             "status": "succeeded", "reused": False,
             "manifest": str(self.manifest_path), "namespace": namespace,
@@ -381,10 +376,5 @@ class CredentialService:
     def _locked_manifest(self) -> Iterator[CredentialManifest]:
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.manifest_path.with_name(f".{self.manifest_path.name}.lock")
-        with lock_path.open("a+") as handle:
-            lock_path.chmod(0o600)
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield self._manifest()
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with file_lock(lock_path):
+            yield self._manifest()

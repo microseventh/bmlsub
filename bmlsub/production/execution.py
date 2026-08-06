@@ -17,9 +17,11 @@ from ..media import FFprobeClient, MediaStreamSummary, MediaSummary, get_current
 from ..media.validators import (
     validate_hardsub_video_output, validate_muxed_video_output, validate_video_output,
 )
+from ..progress import get_progress_reporter, get_progress_task, ProgressEvent
 from ..state.fingerprints import fingerprint_parameters, fingerprint_tools, hash_json
 from ..state.models import (
-    ArtifactRecord, Diagnostic, StageInputBinding, StageResult, StageStatus, ValidationStatus,
+    ArtifactRecord, Diagnostic, DiagnosticLevel, StageInputBinding, StageResult, StageStatus,
+    ValidationStatus,
 )
 from ..state.sqlite_store import SQLiteJobStore
 from .models import ProductionOperation, ProductionRequestInput, ProductionRequestStatus
@@ -149,20 +151,27 @@ def run_production_request(request_id: str, *, workspace: Path | str,
         )
 
     ledger.transition_production_request(request_id, ProductionRequestStatus.RUNNING)
-    result = StageRunner(ledger).run(
-        workspace=root, command_name="production.execute",
-        stage_name=(HEVC_ENCODE_STAGE if request.operation is ProductionOperation.ENCODE
-                    else HARDSUB_ENCODE_STAGE if request.operation is ProductionOperation.HARDSUB
-                    else MUX_SUBTITLE_STAGE),
-        episode_id=request.episode_id, input_fingerprint=input_fp,
-        parameter_fingerprint=parameter_fp, tool_fingerprint=tool_fp,
-        adapter=adapter,
-        inputs=tuple(
-            StageInputBinding(item.artifact_id, item.input_role, item.ordinal)
-            for item in request.inputs
-        ),
-        run_metadata={"production_request_id": request.request_id}, force=force,
-    )
+    try:
+        result = StageRunner(ledger).run(
+            workspace=root, command_name="production.execute",
+            stage_name=(HEVC_ENCODE_STAGE if request.operation is ProductionOperation.ENCODE
+                        else HARDSUB_ENCODE_STAGE if request.operation is ProductionOperation.HARDSUB
+                        else MUX_SUBTITLE_STAGE),
+            episode_id=request.episode_id, input_fingerprint=input_fp,
+            parameter_fingerprint=parameter_fp, tool_fingerprint=tool_fp,
+            adapter=adapter,
+            inputs=tuple(
+                StageInputBinding(item.artifact_id, item.input_role, item.ordinal)
+                for item in request.inputs
+            ),
+            run_metadata={"production_request_id": request.request_id}, force=force,
+        )
+    except KeyboardInterrupt:
+        ledger.transition_production_request(
+            request.request_id, ProductionRequestStatus.FAILED,
+            error_code=ErrorCode.INTERRUPTED.value,
+        )
+        raise
     _update_request_status(ledger, request, result)
     return result
 
@@ -192,7 +201,6 @@ def _encode_hevc(context: StageContext, *, request, video: ArtifactRecord,
             "validator_version": HEVC_VALIDATOR_VERSION,
         },
     )
-
     def produce(paths: tuple[Path, ...]) -> None:
         argv = [
             str(ffmpeg), "-nostdin", "-y", "-v", "error", "-i", str(video.path),
@@ -206,7 +214,10 @@ def _encode_hevc(context: StageContext, *, request, video: ArtifactRecord,
         if profile.strip_metadata:
             argv.extend(["-map_metadata", "-1", "-map_chapters", "-1"])
         argv.extend(["-f", "matroska", str(paths[0])])
-        process.run(argv, timeout=process_timeout)
+        _run_ffmpeg_with_progress(
+            process, argv, timeout=process_timeout, duration_ms=source_duration,
+            label="FFmpeg HEVC 10-bit",
+        )
 
     return _write_video(
         context, request=request, root=root, input_fp=input_fp, parameter_fp=parameter_fp,
@@ -275,7 +286,10 @@ def _encode_hardsub(context: StageContext, *, request, video: ArtifactRecord,
             if profile.strip_metadata:
                 argv.extend(["-map_metadata", "-1", "-map_chapters", "-1"])
             argv.extend(["-movflags", "+faststart", "-f", "mp4", str(paths[0])])
-            process.run(argv, timeout=process_timeout)
+            _run_ffmpeg_with_progress(
+                process, argv, timeout=process_timeout, duration_ms=source_duration,
+                label=f"FFmpeg H.264 {language_key.upper()}",
+            )
 
     return _write_video(
         context, request=request, root=root, input_fp=input_fp, parameter_fp=parameter_fp,
@@ -316,6 +330,7 @@ def _mux_subtitles(context: StageContext, *, request, video: ArtifactRecord,
             "validator_version": MUX_SUBTITLE_VALIDATOR_VERSION,
         },
     )
+    mux_warnings: list[Diagnostic] = []
 
     def produce(paths: tuple[Path, ...]) -> None:
         argv = [str(mkvmerge), "--output", str(paths[0]), "--no-subtitles", "--no-attachments",
@@ -341,13 +356,33 @@ def _mux_subtitles(context: StageContext, *, request, video: ArtifactRecord,
                 "--attachment-mime-type", mime_type,
                 "--attach-file", str(artifact.path),
             ])
-        process.run(argv, timeout=process_timeout)
+        # mkvmerge uses exit code 1 for a completed mux with warnings.
+        result = process.run(argv, timeout=process_timeout, check=False)
+        if result.returncode == 1:
+            diagnostic = result.stderr_text().strip()
+            mux_warnings.append(Diagnostic(
+                code="mkvmerge_warnings",
+                message="mkvmerge completed with warnings",
+                level=DiagnosticLevel.WARNING,
+                context={"diagnostic": diagnostic[:8192]} if diagnostic else {},
+            ))
+        elif result.returncode != 0:
+            raise BmlsubError(
+                "mkvmerge failed", code=ErrorCode.EXTERNAL_SERVICE_ERROR,
+                details={
+                    "executable": str(mkvmerge), "returncode": result.returncode,
+                    "diagnostic": result.stderr_text().strip()[:8192],
+                },
+            )
 
-    return _write_video(
+    outcome = _write_video(
         context, request=request, root=root, input_fp=input_fp, parameter_fp=parameter_fp,
         spec=spec, produce=produce, validation=validation,
         message="production request generated a validated internal-subtitle MKV",
     )
+    if mux_warnings:
+        return replace(outcome, diagnostics=(*outcome.diagnostics, *mux_warnings))
+    return outcome
 
 
 def _write_video(context: StageContext, *, request, root: Path, input_fp: str,
@@ -495,6 +530,60 @@ def _source_duration(video: ArtifactRecord) -> int | None:
     media = video.metadata.get("media")
     duration = media.get("duration_ms") if isinstance(media, dict) else None
     return duration if isinstance(duration, int) else None
+
+
+def parse_ffmpeg_progress_time_ms(line: str) -> int | None:
+    """Parse an observable output timestamp from one FFmpeg -progress line."""
+    key, separator, value = line.strip().partition("=")
+    if not separator:
+        return None
+    if key in {"out_time_us", "out_time_ms"}:
+        try:
+            return max(0, int(value) // 1000)
+        except ValueError:
+            return None
+    if key != "out_time":
+        return None
+    try:
+        hours, minutes, seconds = value.split(":", 2)
+        return max(0, round(
+            (int(hours) * 3600 + int(minutes) * 60 + float(seconds)) * 1000
+        ))
+    except (TypeError, ValueError):
+        return None
+
+
+def _run_ffmpeg_with_progress(process: ProcessRunner, argv: list[str], *,
+                              timeout: float, duration_ms: int | None,
+                              label: str) -> None:
+    run_streaming = getattr(process, "run_streaming", None)
+    if not callable(run_streaming):
+        process.run(argv, timeout=timeout)
+        return
+    reporter = get_progress_reporter()
+    task = get_progress_task()
+    last_time = 0
+
+    def report(line: str) -> None:
+        nonlocal last_time
+        current = parse_ffmpeg_progress_time_ms(line)
+        if current is None or current < last_time:
+            return
+        last_time = current
+        if task is not None:
+            task.update(current=current, total=duration_ms, unit="ms")
+        else:
+            reporter.report(ProgressEvent(
+                phase="delivery", step="production.ffmpeg",
+                label=label, state="running", current=current,
+                total=duration_ms, unit="ms",
+            ))
+
+    progress_argv = [argv[0], "-progress", "pipe:2", "-nostats", *argv[1:]]
+    run_streaming(
+        progress_argv, stderr_line_callback=report, timeout=timeout,
+        max_stderr_bytes=2 * 1024 * 1024,
+    )
 
 
 def _source_video_stream(video: ArtifactRecord) -> dict[str, int | None]:

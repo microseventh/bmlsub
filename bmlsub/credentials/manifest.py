@@ -8,7 +8,11 @@ from pathlib import Path
 import tempfile
 from typing import Any, Mapping
 
-from .keychain import MacOSKeychainSecretStore, SecretStore
+from ..platform.filesystem import (
+    fsync_directory, fsync_file, has_private_permissions,
+    is_owned_by_current_user, set_private_permissions,
+)
+from .keychain import SecretStore, default_secret_store
 from .models import CREDENTIAL_MANIFEST_SCHEMA, CredentialManifest, CredentialProfile
 from .ssh_config import SSHConfigResolver
 
@@ -48,19 +52,27 @@ def load_secure_json(path: Path | str) -> dict[str, Any]:
     source = Path(path).expanduser()
     try:
         stat = source.lstat()
-        if source.is_symlink() or not source.is_file():
-            raise ValueError("credential JSON must be a regular non-symlink file")
-        if stat.st_uid != os.getuid():
-            raise ValueError("credential JSON must be owned by the current user")
-        if stat.st_mode & 0o077:
-            raise ValueError("credential JSON permissions must be 0600 or stricter")
-        value = json.loads(source.read_text(encoding="utf-8"))
-    except ValueError:
-        raise
     except FileNotFoundError as exc:
-        raise ValueError("credential JSON does not exist") from exc
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("credential JSON is unreadable or invalid") from exc
+        raise ValueError(f"credential JSON does not exist: {source}") from exc
+    except OSError as exc:
+        raise ValueError(f"credential JSON is unreadable: {source}") from exc
+    if source.is_symlink() or not source.is_file():
+        raise ValueError("credential JSON must be a regular non-symlink file")
+    if not is_owned_by_current_user(stat):
+        raise ValueError("credential JSON must be owned by the current user")
+    if not has_private_permissions(stat):
+        raise ValueError("credential JSON permissions must be 0600 or stricter")
+    try:
+        raw = source.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"credential JSON is unreadable: {source}") from exc
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"credential JSON is invalid: {source} "
+            f"(line {exc.lineno}, column {exc.colno}): {exc.msg}"
+        ) from exc
     if not isinstance(value, dict):
         raise ValueError("credential JSON must contain a JSON object")
     return value
@@ -136,7 +148,7 @@ def import_credential_json(*, input_path: Path | str, manifest_path: Path | str,
     target = Path(manifest_path).expanduser()
     if target.exists() and not replace:
         raise ValueError("credential manifest already exists")
-    store = secret_store or MacOSKeychainSecretStore()
+    store = secret_store or default_secret_store()
     service = manifest.keychain_service()
     if not replace:
         existing = [alias for alias in secrets if store.exists(service, profiles[alias].keychain_account)]
@@ -182,7 +194,7 @@ def upsert_secret_profile(*, manifest_path: Path | str, alias: str, kind: str,
     payload = validate_secret_payload(kind, secret)
     profiles[alias] = profile
     updated = CredentialManifest(namespace=manifest.namespace, profiles=profiles)
-    store = secret_store or MacOSKeychainSecretStore()
+    store = secret_store or default_secret_store()
     service = updated.keychain_service()
     previous = store.get(service, profile.keychain_account)
     if previous is not None and not replace:
@@ -209,7 +221,7 @@ def upsert_secret_profile(*, manifest_path: Path | str, alias: str, kind: str,
 def credential_status(*, manifest_path: Path | str, secret_store: SecretStore | None = None,
                       ssh_resolver: SSHConfigResolver | None = None) -> dict[str, Any]:
     manifest = load_credential_manifest(manifest_path)
-    store = secret_store or MacOSKeychainSecretStore()
+    store = secret_store or default_secret_store()
     resolver = ssh_resolver or SSHConfigResolver()
     profiles = []
     for profile in manifest.profiles.values():
@@ -228,7 +240,7 @@ def credential_status(*, manifest_path: Path | str, secret_store: SecretStore | 
 def validate_credentials(*, manifest_path: Path | str, secret_store: SecretStore | None = None,
                          ssh_resolver: SSHConfigResolver | None = None) -> dict[str, Any]:
     manifest = load_credential_manifest(manifest_path)
-    store = secret_store or MacOSKeychainSecretStore()
+    store = secret_store or default_secret_store()
     resolver = ssh_resolver or SSHConfigResolver()
     profiles = []
     for profile in manifest.profiles.values():
@@ -253,7 +265,7 @@ def validate_credentials(*, manifest_path: Path | str, secret_store: SecretStore
 def read_secret_profile(manifest: CredentialManifest, alias: str, kind: str,
                         secret_store: SecretStore | None = None) -> tuple[dict[str, str], str]:
     profile = manifest.profile(alias, kind=kind)
-    store = secret_store or MacOSKeychainSecretStore()
+    store = secret_store or default_secret_store()
     raw = store.get(manifest.keychain_service(), profile.keychain_account)
     if raw is None:
         raise ValueError(f"credential profile is unavailable: {alias}")
@@ -302,19 +314,15 @@ def _atomic_write_manifest(path: Path, manifest: CredentialManifest) -> None:
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     temporary = Path(name)
     try:
-        os.fchmod(descriptor, 0o600)
+        set_private_permissions(descriptor)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(manifest.to_dict(), handle, ensure_ascii=False, sort_keys=True, indent=2)
             handle.write("\n")
             handle.flush()
-            os.fsync(handle.fileno())
+            fsync_file(handle)
         os.replace(temporary, path)
-        os.chmod(path, 0o600)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        set_private_permissions(path)
+        fsync_directory(path.parent)
     finally:
         if temporary.exists():
             temporary.unlink()

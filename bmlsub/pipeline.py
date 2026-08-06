@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .ass_analysis import (
     AssAnalysisProfile, AssReconstructionProfile, combine_analyses, export_analysis,
@@ -413,6 +413,7 @@ class Pipeline:
                    output_dir: Path | str | None = None,
                    ffmpeg: Path | str = "ffmpeg",
                    process_timeout: float = 600.0,
+                   progress_callback: Callable[[dict[str, Any]], None] | None = None,
                    force: bool = False) -> dict[str, Any]:
         return run_transcription(
             workspace=workspace, episode_id=episode_id,
@@ -426,7 +427,8 @@ class Pipeline:
             ),
             output_dir=output_dir, ffmpeg=ffmpeg,
             process_timeout=process_timeout, store=self.store,
-            state_dir=self.state_dir, force=force,
+            state_dir=self.state_dir, progress_callback=progress_callback,
+            force=force,
         ).to_dict()
 
     def analyze_ass(

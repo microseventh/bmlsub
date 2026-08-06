@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr
+import io
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from bmlsub.cli import (
-    _choose_or_create_profile, _prompt_default, _select_nyaa_syndication,
-    _select_ui_language, _print_publish_plan, build_parser,
+    _choose_or_create_profile, _delivery_credential_status, _delivery_public_values,
+    _prompt_default, _select_nyaa_syndication, _select_ui_language,
+    _print_publish_plan, build_parser,
 )
+from bmlsub.credentials import load_secure_json
 from bmlsub.interactive import set_ui_language
-from contextlib import redirect_stderr
-import io
 
 
 class FakeCredentialService:
@@ -34,17 +39,66 @@ class FakeCredentialService:
 
 
 class CredentialWizardTests(unittest.TestCase):
+    def test_invalid_credential_json_reports_path_and_location(self):
+        with TemporaryDirectory() as temporary:
+            manifest = Path(temporary) / "credentials.json"
+            manifest.write_text('{"profiles": {},}\n', encoding="utf-8")
+            manifest.chmod(0o600)
+            with self.assertRaisesRegex(
+                ValueError,
+                rf"credential JSON is invalid: {manifest} .*line 1, column 17",
+            ):
+                load_secure_json(manifest)
+
+    def test_delivery_status_rejects_invalid_manifest_before_profile_checks(self):
+        with TemporaryDirectory() as temporary:
+            manifest = Path(temporary) / "credentials.json"
+            manifest.write_text('{"profiles": {},}\n', encoding="utf-8")
+            manifest.chmod(0o600)
+            config = SimpleNamespace(
+                credential_manifest=manifest,
+                r2_credential_profile=None,
+                ssh_profile=None,
+                qb_credential_profile=None,
+                anibt_credential_profile=None,
+            )
+            status = _delivery_credential_status(config)
+        self.assertEqual(status["status"], "invalid")
+        self.assertIn("line 1, column 17", status["manifest_error"])
+        self.assertEqual(status["profiles"], [])
+
+    def test_initial_delivery_configuration_requires_qb_origin_and_port(self):
+        prompts = iter([
+            "/data/dcapp/qb/downloads", "8081", "https://qb.microseventh.eu.org",
+        ])
+        captured = []
+        with patch(
+            "bmlsub.cli._prompt_stderr",
+            side_effect=lambda prompt: captured.append(prompt) or next(prompts),
+        ):
+            values = _delivery_public_values(
+                {"qb_save_path": "/downloads"}, "uk-vps", edit_existing=False,
+            )
+        self.assertEqual(values["qb_port"], 8081)
+        self.assertEqual(values["qb_webui_origin"], "https://qb.microseventh.eu.org")
+        self.assertTrue(any("qBittorrent WebUI 端口" in item for item in captured))
+        self.assertTrue(any("qBittorrent WebUI 来源地址" in item for item in captured))
+
+    def test_delivery_configuration_rejects_invalid_qb_origin(self):
+        prompts = iter(["/data/releases", "8081", "http://qb.example.test"])
+        with patch("bmlsub.cli._prompt_stderr", side_effect=lambda prompt: next(prompts)):
+            with self.assertRaisesRegex(ValueError, "HTTPS origin"):
+                _delivery_public_values({}, "uk-vps", edit_existing=False)
+
     def test_delivery_configure_flag_is_explicit(self):
-        args = build_parser().parse_args(["workstation", "start", "delivery", "--configure"])
-        self.assertTrue(args.configure)
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(["ws", "end", "--configure"])
 
     def test_delivery_parser_supports_yes_and_recovery_modes(self):
-        args = build_parser().parse_args([
-            "workstation", "start", "delivery", "-y", "--resume", "--verbose-plan",
-        ])
-        self.assertTrue(args.yes)
-        self.assertTrue(args.resume)
-        self.assertTrue(args.verbose_plan)
+        args = build_parser().parse_args(["ws", "end", "yes"])
+        self.assertEqual(args.unattended, "yes")
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(["ws", "end", "yes", "--resume"])
 
     def test_yes_mode_defaults_to_nyaa_without_prompting(self):
         with patch("bmlsub.cli._confirm_stderr", side_effect=AssertionError("prompted")):
@@ -139,6 +193,32 @@ class CredentialWizardTests(unittest.TestCase):
             "secret_access_key": "secret-access",
         })
         self.assertEqual(service.validated, ["r2-main"])
+
+    def test_new_qbittorrent_prompts_username_and_hidden_password(self):
+        service = FakeCredentialService([])
+        prompts = iter(["qb-main", "operator"])
+        with patch("bmlsub.cli._prompt_stderr", side_effect=lambda prompt: next(prompts)), \
+             patch("bmlsub.cli._secret_stderr", return_value="qb-password"):
+            result = _choose_or_create_profile(service, "qbittorrent")
+        self.assertEqual(result, ("qb-main", "created"))
+        self.assertEqual(service.created[0]["secret"], {
+            "username": "operator", "password": "qb-password",
+        })
+        self.assertEqual(service.validated, ["qb-main"])
+
+    def test_qbittorrent_profile_menu_names_username_password_input(self):
+        set_ui_language("zh")
+        service = FakeCredentialService([
+            {"alias": "qb-main", "kind": "qbittorrent", "available": True},
+        ])
+        output = io.StringIO()
+        prompts = iter(["2", "qb-new", "operator"])
+        with redirect_stderr(output), \
+             patch("bmlsub.cli._prompt_stderr", side_effect=lambda prompt: next(prompts)), \
+             patch("bmlsub.cli._secret_stderr", return_value="qb-password"):
+            result = _choose_or_create_profile(service, "qbittorrent", reselect=True)
+        self.assertEqual(result, ("qb-new", "created"))
+        self.assertIn("输入 qBittorrent 用户名和密码", output.getvalue())
 
     def test_available_r2_is_reused_without_secret_prompt(self):
         service = FakeCredentialService([{"alias": "r2-main", "kind": "r2", "available": True}])

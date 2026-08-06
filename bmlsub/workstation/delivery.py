@@ -11,6 +11,8 @@ from ..production.models import ProductionOperation
 from ..production.profiles import (
     H264_CHS_PROFILE, HEVC_10BIT_PROFILE, normalize_profile,
 )
+from ..interactive import ui_text
+from ..progress import finish_progress_task, progress_task
 from ..release.profiles import normalize_torrent_profile
 from ..state.fingerprints import fingerprint_file, fingerprint_parameters, fingerprint_tools, hash_json
 from ..state.models import Diagnostic, StageInputBinding
@@ -22,7 +24,7 @@ from .common import (
 from .models import DeliveryConfig, DeliverySelection, WorkstationConfig
 from .series import discover_series_context
 from .naming import ProductKind
-from .state import atomic_write_json, load_manifest, pipeline_payload_step, refresh_summary, result_step, step_payload, update_manifest, write_step
+from .state import atomic_write_json, load_manifest, pipeline_payload_step, read_json, refresh_summary, result_step, step_payload, update_manifest, write_step
 
 
 COPY_TOOL_VERSION = "workstation-copy-v1"
@@ -31,6 +33,21 @@ _PRODUCT_MANIFEST_FIELDS = {
     ProductKind.MP4_CHT.value: "hardsub_cht_artifact_id",
     ProductKind.MKV_HEVC.value: "muxed_mkv_artifact_id",
 }
+_PRODUCTION_PROGRESS_LABELS = {
+    "hevc": ("HEVC 10-bit 编码", "Encode HEVC 10-bit"),
+    "hardsub_chs": ("压制简体 MP4", "Encode Simplified MP4"),
+    "hardsub_cht": ("压制繁体 MP4", "Encode Traditional MP4"),
+}
+
+
+def _persist_delivery_config(root: Path, config: WorkstationConfig) -> None:
+    """Persist delivery settings without discarding prior preprocess choices."""
+    path = root / "workstation" / "state" / "config.json"
+    previous = read_json(path, {})
+    payload = config.to_dict()
+    if isinstance(previous, dict) and isinstance(previous.get("preprocess"), dict):
+        payload["preprocess"] = previous["preprocess"]
+    atomic_write_json(path, payload)
 
 
 def plan_delivery_execution(
@@ -251,7 +268,7 @@ def validate_translation_delivery(episode_dir: Path | str, *, episode_id: str | 
         root, workflow_id=config.workflow_id, phase="translation",
         step="translation.validate_delivery", payload=subtitle_result,
     )
-    atomic_write_json(root / "workstation" / "state" / "config.json", config.to_dict())
+    _persist_delivery_config(root, config)
     refresh_summary(root)
     return payload
 
@@ -405,6 +422,9 @@ def run_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
         publish_step = result_step(root, workflow_id=config.workflow_id, phase="delivery",
                                    step="delivery.publish_cht_subtitle", result=published,
                                    inputs=(cht_artifact,))
+        if publish_step["status"] not in {"succeeded", "skipped"}:
+            refresh_summary(root)
+            return publish_step
         cht_delivery_id = publish_step["outputs"][0]["artifact_id"]
         update_manifest(root, subtitles={"cht_delivery_artifact_id": cht_delivery_id})
 
@@ -413,7 +433,8 @@ def run_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
         analysis = workstation.pipeline.analyze_ass(
             workspace=root, episode_id=identifier, subtitle_artifact_id=subtitle_id,
             video_artifact_id=source_video_id, font_artifact_ids=font_ids,
-            profile=ass_profile or {}, output=paths["subtitle_analysis"] / f"{key}.analysis.json",
+            profile=dict(config.delivery.ass_profile),
+            output=paths["subtitle_analysis"] / f"{key}.analysis.json",
             force=force,
         )
         analyses.append(analysis)
@@ -463,9 +484,15 @@ def run_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
             output_profile=profile, output_target=target, parameters=parameters,
         )
         requests[key] = created["request"]
-        executions[key] = workstation.pipeline.execute_production_request(
-            created["request"]["request_id"], workspace=root, force=force
-        )
+        label = _PRODUCTION_PROGRESS_LABELS[key]
+        with progress_task(
+            phase="delivery", step=f"delivery.encode_{key}",
+            label=ui_text(*label), detail=Path(target).name, heartbeat=False,
+        ) as task:
+            executions[key] = workstation.pipeline.execute_production_request(
+                created["request"]["request_id"], workspace=root, force=force
+            )
+            finish_progress_task(task, executions[key])
         pipeline_payload_step(
             root, workflow_id=config.workflow_id, phase="delivery",
             step=f"delivery.encode_{key}", payload=executions[key],
@@ -487,9 +514,15 @@ def run_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
             output_target=products[ProductKind.MKV_HEVC.value],
             parameters={"default_subtitle_ordinal": 0},
         )
-        mux_result = workstation.pipeline.execute_production_request(
-            mux["request"]["request_id"], workspace=root, force=force
-        )
+        with progress_task(
+            phase="delivery", step="delivery.mux_subtitles",
+            label=ui_text("封装简繁内封 MKV", "Mux bilingual MKV"),
+            detail=products[ProductKind.MKV_HEVC.value].name, heartbeat=False,
+        ) as task:
+            mux_result = workstation.pipeline.execute_production_request(
+                mux["request"]["request_id"], workspace=root, force=force
+            )
+            finish_progress_task(task, mux_result)
         mux_step = pipeline_payload_step(
             root, workflow_id=config.workflow_id, phase="delivery",
             step="delivery.mux_subtitles", payload=mux_result,
@@ -509,14 +542,21 @@ def run_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
     torrent_ids = {}
     if selection.create_torrents:
         last_torrent = None
-        for key in selection.products:
-            product_id = product_ids[key]
-            last_torrent = workstation.pipeline.create_torrent(
-                workspace=root, episode_id=identifier, content_artifact_id=product_id,
-                profile=config.delivery.torrent_profile, output=config.torrent_paths()[key],
-                force=force,
-            )
-            torrent_ids[key] = last_torrent["artifacts"][0]["artifact_id"]
+        with progress_task(
+            phase="delivery", step="delivery.create_torrents",
+            label=ui_text("创建 Torrent", "Create Torrents"),
+            current=0, total=len(selection.products), unit=ui_text("个", "files"),
+        ) as task:
+            for index, key in enumerate(selection.products, 1):
+                product_id = product_ids[key]
+                last_torrent = workstation.pipeline.create_torrent(
+                    workspace=root, episode_id=identifier, content_artifact_id=product_id,
+                    profile=config.delivery.torrent_profile, output=config.torrent_paths()[key],
+                    force=force,
+                )
+                torrent_ids[key] = last_torrent["artifacts"][0]["artifact_id"]
+                task.update(current=index, detail=key)
+            finish_progress_task(task, last_torrent or {"status": "succeeded"})
         pipeline_payload_step(
             root, workflow_id=config.workflow_id, phase="delivery",
             step="delivery.create_torrents", payload=last_torrent,
@@ -580,7 +620,7 @@ def run_delivery_step(step: str, episode_dir: Path | str, *, episode_id: str | N
         ),
     )
     workstation = open_workstation(config)
-    atomic_write_json(root / "workstation" / "state" / "config.json", config.to_dict())
+    _persist_delivery_config(root, config)
     manifest = load_manifest(root)
     products = config.product_paths()
 

@@ -8,6 +8,8 @@ from typing import Any
 from ..artifacts import ArtifactBatchWriter, ArtifactWriteSpec
 from ..execution.stage_runner import StageContext, StageOutcome, StageRunner
 from ..media.tracks import languages_match
+from ..interactive import ui_text
+from ..progress import finish_progress_task, progress_task
 from ..state.fingerprints import fingerprint_parameters, fingerprint_tools, hash_json
 from ..state.models import Diagnostic, StageInputBinding
 from ..transcription import run_transcript_text_export
@@ -294,14 +296,28 @@ def run_preprocess(episode_dir: Path | str, *, episode_id: str | None = None,
     chunk_ids = {}
     export_step = None
     for job in whisper_jobs:
-        result = workstation.pipeline.transcribe(
-            workspace=root, episode_id=identifier, audio_artifact_id=transcribe_id,
-            mode=job.mode, model=job.model, model_revision=job.model_revision,
-            language=job.language, chunk_seconds=job.chunk_seconds,
-            overlap_seconds=job.overlap_seconds, manual_cuts=job.manual_cuts,
-            throttle_seconds=job.throttle_seconds, decoding=dict(job.decoding),
-            output_dir=paths["transcripts"] / job.name, force=force,
-        )
+        with progress_task(
+            phase="preprocess", step=f"preprocess.transcribe.{job.name}",
+            label=ui_text("MLX Whisper 转录", "MLX Whisper transcription"),
+            detail=f"{job.name} ({job.mode})",
+        ) as task:
+            def update_progress(event: dict[str, Any]) -> None:
+                task.update(
+                    current=event.get("current"), total=event.get("total"),
+                    unit=ui_text("段", "chunks"),
+                    detail=f"{job.name} ({event.get('mode') or job.mode})",
+                )
+
+            result = workstation.pipeline.transcribe(
+                workspace=root, episode_id=identifier, audio_artifact_id=transcribe_id,
+                mode=job.mode, model=job.model, model_revision=job.model_revision,
+                language=job.language, chunk_seconds=job.chunk_seconds,
+                overlap_seconds=job.overlap_seconds, manual_cuts=job.manual_cuts,
+                throttle_seconds=job.throttle_seconds, decoding=dict(job.decoding),
+                output_dir=paths["transcripts"] / job.name,
+                progress_callback=update_progress, force=force,
+            )
+            finish_progress_task(task, result)
         final = pipeline_payload_step(
             root, workflow_id=config.workflow_id, phase="preprocess",
             step=f"preprocess.transcribe.{job.name}", payload=result,

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from ..execution.errors import ArtifactCommitError, OutputValidationError
+from ..platform.filesystem import fsync_directory, fsync_file
 from ..state.fingerprints import fingerprint_file
 from ..state.models import ArtifactRecord, JsonValue, ValidationStatus, utc_now
 
@@ -207,13 +208,8 @@ class ArtifactBatchWriter:
 
     @staticmethod
     def _fsync_file(path: Path) -> None:
-        with path.open("rb") as handle:
-            os.fsync(handle.fileno())
+        fsync_file(path)
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
-        descriptor = os.open(path, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        fsync_directory(path)
