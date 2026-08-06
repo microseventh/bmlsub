@@ -2,7 +2,8 @@
 
 当前版本：`1.2.1`。
 
-- [根目录 README](../../README.md)
+[English README](../../README.md)
+
 - [快速开始](../quickstart.md)
 - [CLI 参考](../cli.md)
 - [Workstation 工作流](../workstation.md)
