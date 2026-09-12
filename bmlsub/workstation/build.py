@@ -823,7 +823,8 @@ def _execute_anibt(source: Path, output: Mapping[str, Any], context: BuildContex
         file_size=metadata.length, trackers=tuple(trackers), notes=str(options.get("notes") or ""),
         nyaa=nyaa, nyaa_category=NYAA_TRANSLATED_ANIME_CATEGORY if nyaa else "",
     )
-    response = RequestsAnibtClient().publish(
+    client = RequestsAnibtClient()
+    response = client.publish(
         torrent_path=source, profile=profile,
         api_url=credentials.api_url, token=credentials.token,
     )
@@ -831,6 +832,7 @@ def _execute_anibt(source: Path, output: Mapping[str, Any], context: BuildContex
         **dict(output), "torrent_id": metadata.torrent_id,
         "info_hash_v1": metadata.info_hash_v1, "name": metadata.name,
         "length": metadata.length, "credential_profile": alias,
+        "publish_mode": client.last_publish_mode,
         "profile": profile.receipt_summary(),
         "response": {key: value for key, value in response.items()
                      if key in {"ok", "id", "releaseId", "url", "message"}},

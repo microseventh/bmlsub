@@ -1,4 +1,4 @@
-# bmlsub 1.2.2
+# bmlsub 1.2.3
 
 [简体中文](docs/zh/README.md)
 
@@ -40,7 +40,7 @@ python -m pip install -e '.[transcription]'
 bmlsub --version
 ```
 
-The expected version output is `bmlsub 1.2.2`.
+The expected version output is `bmlsub 1.2.3`.
 
 ## Recommended workflow
 

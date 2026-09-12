@@ -2,6 +2,16 @@
 
 All notable changes to `bmlsub` are recorded here.
 
+## 1.2.3 - 2026-09-12
+
+### Anibt array compatibility fallback
+
+- Prefer the legacy 1.2.1 JSON-string array encoding for `language` and
+  `trackers`, which is accepted by the updated Anibt service.
+- Retry once with the 1.2.2 repeated multipart field encoding when the legacy
+  request fails.
+- Record the serialization mode used by the successful publish attempt.
+
 ## 1.2.2 - 2026-09-12
 
 ### Anibt multipart compatibility

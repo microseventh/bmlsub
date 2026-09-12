@@ -14,9 +14,11 @@ from ..execution.errors import BmlsubError, ErrorCode
 from .external_profiles import AnibtPublishProfile
 
 
-ANIBT_ADAPTER_VERSION = "anibt-adapter-v8"
+ANIBT_ADAPTER_VERSION = "anibt-adapter-v9"
 ANIBT_RECEIPT_SCHEMA = "anibt-receipt-v2"
 NYAA_TRANSLATED_ANIME_CATEGORY = "1_3"
+ANIBT_LEGACY_ARRAY_MODE = "legacy-json-array"
+ANIBT_REPEATED_FIELDS_MODE = "repeated-fields"
 _ANIBT_TIMEOUT = (10.0, 60.0)
 _MAX_ERROR_TEXT = 500
 _MAX_RESPONSE_TEXT = 4_000
@@ -53,6 +55,9 @@ class AnibtClient(Protocol):
 
 
 class RequestsAnibtClient:
+    def __init__(self) -> None:
+        self.last_publish_mode = ANIBT_LEGACY_ARRAY_MODE
+
     @property
     def version(self) -> str:
         return ANIBT_ADAPTER_VERSION
@@ -66,11 +71,27 @@ class RequestsAnibtClient:
             )
         if not profile.trackers:
             profile = replace(profile, trackers=("https://tracker.anibt.net/announce",))
-        return self._publish_multipart(torrent_path, profile, api_url, token)
+        errors: list[BmlsubError] = []
+        for mode in (ANIBT_LEGACY_ARRAY_MODE, ANIBT_REPEATED_FIELDS_MODE):
+            try:
+                response = self._publish_multipart(
+                    torrent_path, profile, api_url, token, mode=mode,
+                )
+            except BmlsubError as exc:
+                errors.append(exc)
+                continue
+            self.last_publish_mode = mode
+            return response
+        fallback = errors[-1]
+        raise BmlsubError(
+            f"anibt API publish failed with {ANIBT_LEGACY_ARRAY_MODE}; "
+            f"fallback {ANIBT_REPEATED_FIELDS_MODE} also failed: {fallback}",
+            code=fallback.code,
+        ) from fallback
 
     def _publish_multipart(self, torrent_path: Path, profile: AnibtPublishProfile,
-                           api_url: str, token: str) -> dict[str, Any]:
-        data = self._multipart_fields(profile)
+                           api_url: str, token: str, *, mode: str) -> dict[str, Any]:
+        data = self._multipart_fields(profile, mode=mode)
         with torrent_path.open("rb") as torrent_file:
             files = {
                 "torrent": (
@@ -98,13 +119,20 @@ class RequestsAnibtClient:
         return self._handle_response(response)
 
     @staticmethod
-    def _multipart_fields(profile: AnibtPublishProfile) -> list[tuple[str, str]]:
+    def _multipart_fields(profile: AnibtPublishProfile, *, mode: str = ANIBT_LEGACY_ARRAY_MODE,
+                          ) -> list[tuple[str, str]]:
+        if mode not in {ANIBT_LEGACY_ARRAY_MODE, ANIBT_REPEATED_FIELDS_MODE}:
+            raise ValueError(f"unsupported Anibt multipart mode: {mode}")
         fields: list[tuple[str, str]] = []
         values = profile.api_fields()
         for attr_name, api_name in _API_FIELD_NAMES.items():
             value = values[attr_name]
             if attr_name in ("language", "trackers"):
-                fields.extend((api_name, str(item)) for item in value)
+                if mode == ANIBT_LEGACY_ARRAY_MODE:
+                    if value:
+                        fields.append((api_name, json.dumps(list(value), ensure_ascii=False)))
+                else:
+                    fields.extend((api_name, str(item)) for item in value)
             elif isinstance(value, bool):
                 if value or (profile.nyaa and attr_name in ("nyaa_complete", "nyaa_remake")):
                     fields.append((api_name, "true" if value else "false"))

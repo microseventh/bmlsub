@@ -26,7 +26,7 @@ from .torrent import read_torrent_metadata
 
 ANIBT_PUBLISH_STAGE = "release.publish_anibt"
 ANIBT_PUBLISH_ARTIFACT_TYPE = "generated.release.remote.anibt"
-ANIBT_EXECUTION_VERSION = "anibt-execution-v7"
+ANIBT_EXECUTION_VERSION = "anibt-execution-v8"
 
 
 def run_anibt_publish(*, workspace: Path | str, episode_id: str,
@@ -126,11 +126,11 @@ def run_anibt_publish(*, workspace: Path | str, episode_id: str,
             return False
 
     def adapter(context: StageContext) -> StageOutcome:
-        mode = "multipart"
         api_response = client.publish(
             torrent_path=torrent.path, profile=normalized,
             api_url=api_url, token=token,
         )
+        mode = getattr(client, "last_publish_mode", "multipart")
         receipt = build_receipt_payload(
             torrent_artifact_id=torrent.artifact_id,
             profile=normalized, api_response=api_response, mode=mode,
