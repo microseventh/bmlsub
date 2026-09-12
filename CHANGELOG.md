@@ -2,6 +2,17 @@
 
 All notable changes to `bmlsub` are recorded here.
 
+## 1.2.2 - 2026-09-12
+
+### Anibt multipart compatibility
+
+- Serialize multipart `language` and `trackers` arrays as repeated form fields
+  to match the current Anibt publish API contract.
+- Use Nyaa category `1_3` for translated anime releases instead of the raw
+  anime category `1_4`.
+- Add regression coverage for multipart array serialization and Workstation
+  Nyaa publication profiles.
+
 ## 1.2.1 - 2026-08-06
 
 ### Compact CLI and standalone operations

@@ -14,8 +14,9 @@ from ..execution.errors import BmlsubError, ErrorCode
 from .external_profiles import AnibtPublishProfile
 
 
-ANIBT_ADAPTER_VERSION = "anibt-adapter-v7"
+ANIBT_ADAPTER_VERSION = "anibt-adapter-v8"
 ANIBT_RECEIPT_SCHEMA = "anibt-receipt-v2"
+NYAA_TRANSLATED_ANIME_CATEGORY = "1_3"
 _ANIBT_TIMEOUT = (10.0, 60.0)
 _MAX_ERROR_TEXT = 500
 _MAX_RESPONSE_TEXT = 4_000
@@ -103,8 +104,7 @@ class RequestsAnibtClient:
         for attr_name, api_name in _API_FIELD_NAMES.items():
             value = values[attr_name]
             if attr_name in ("language", "trackers"):
-                if value:
-                    fields.append((api_name, json.dumps(list(value), ensure_ascii=False)))
+                fields.extend((api_name, str(item)) for item in value)
             elif isinstance(value, bool):
                 if value or (profile.nyaa and attr_name in ("nyaa_complete", "nyaa_remake")):
                     fields.append((api_name, "true" if value else "false"))

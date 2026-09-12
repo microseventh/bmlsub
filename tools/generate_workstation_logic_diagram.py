@@ -472,7 +472,7 @@ def publish_page(mxfile: ET.Element) -> None:
 
     anibt_loop = p.node("anibt_loop", "for 每个 product", 150, 90, 240, 75, "process", parent=anibt_lane)
     profile = p.node("profile", "构建 Anibt Profile", 100, 240, 340, 120, "process", parent=anibt_lane,
-                     detail="格式/字幕/语言/1080p/大小/notes；可选 Nyaa 1_4 + trackers",
+                     detail="格式/字幕/语言/1080p/大小/notes；可选 Nyaa 1_3 + trackers",
                      ref="publish.py:_anibt_profile:345")
     publish = p.node("publish", "publish.anibt", 100, 440, 340, 100, "io", parent=anibt_lane,
                      detail="上传 Torrent + Anibt credential", ref="publish.py:302-330")

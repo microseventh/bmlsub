@@ -7,17 +7,18 @@ from bmlsub.release.external_profiles import AnibtPublishProfile
 
 
 class AnibtMultipartTests(unittest.TestCase):
-    def test_nyaa_syndication_serializes_required_true_and_false_flags(self):
+    def test_nyaa_syndication_serializes_repeated_arrays_and_flags(self):
         profile = AnibtPublishProfile(
             anime_id="12345",
             title="Example 01",
             notes="release notes",
+            language=("CHS", "JP"),
             trackers=(
                 "https://tracker.anibt.net/announce",
                 "http://nyaa.tracker.wf:7777/announce",
             ),
             nyaa=True,
-            nyaa_category="1_4",
+            nyaa_category="1_3",
             nyaa_complete=False,
             nyaa_remake=False,
         )
@@ -25,11 +26,22 @@ class AnibtMultipartTests(unittest.TestCase):
         fields = RequestsAnibtClient._multipart_fields(profile)
 
         self.assertIn(("nyaa", "true"), fields)
-        self.assertIn(("nyaaCategory", "1_4"), fields)
+        self.assertIn(("nyaaCategory", "1_3"), fields)
         self.assertIn(("nyaaComplete", "false"), fields)
         self.assertIn(("nyaaRemake", "false"), fields)
         self.assertIn(("notes", "release notes"), fields)
         self.assertFalse(any(name == "nyaaDescription" for name, _ in fields))
+        self.assertEqual(
+            [value for name, value in fields if name == "language"],
+            ["CHS", "JP"],
+        )
+        self.assertEqual(
+            [value for name, value in fields if name == "trackers"],
+            [
+                "https://tracker.anibt.net/announce",
+                "http://nyaa.tracker.wf:7777/announce",
+            ],
+        )
 
     def test_anibt_only_profile_omits_nyaa_fields(self):
         profile = AnibtPublishProfile(
@@ -52,7 +64,7 @@ class AnibtMultipartTests(unittest.TestCase):
             title="Example 01",
             trackers=("http://nyaa.tracker.wf:7777/announce",),
             nyaa=True,
-            nyaa_category="1_4",
+            nyaa_category="1_3",
         )
 
         self.assertNotEqual(plain.normalized(), syndicated.normalized())

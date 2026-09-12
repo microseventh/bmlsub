@@ -1,6 +1,6 @@
 # bmlsub 中文文档
 
-当前版本：`1.2.1`。
+当前版本：`1.2.2`。
 
 [English README](../../README.md)
 

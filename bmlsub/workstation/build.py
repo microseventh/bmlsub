@@ -791,7 +791,7 @@ def _execute_upr2(source: Path, output: Mapping[str, Any], context: BuildContext
 def _execute_anibt(source: Path, output: Mapping[str, Any], context: BuildContext,
                    options: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
     from ..credentials import CredentialService
-    from ..release.anibt import RequestsAnibtClient
+    from ..release.anibt import NYAA_TRANSLATED_ANIME_CATEGORY, RequestsAnibtClient
     from ..release.external_profiles import AnibtPublishProfile
     from ..release.torrent import read_torrent_metadata
 
@@ -821,7 +821,7 @@ def _execute_anibt(source: Path, output: Mapping[str, Any], context: BuildContex
         subtitle=str(options.get("subtitle") or "INTERNAL"),
         format=str(options.get("format") or Path(metadata.name).suffix.lstrip(".").upper() or "MKV"),
         file_size=metadata.length, trackers=tuple(trackers), notes=str(options.get("notes") or ""),
-        nyaa=nyaa, nyaa_category="1_4" if nyaa else "",
+        nyaa=nyaa, nyaa_category=NYAA_TRANSLATED_ANIME_CATEGORY if nyaa else "",
     )
     response = RequestsAnibtClient().publish(
         torrent_path=source, profile=profile,

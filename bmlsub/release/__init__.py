@@ -1,7 +1,10 @@
 """Public local and external release APIs."""
 
 from ..credentials import SecretStore
-from .anibt import ANIBT_ADAPTER_VERSION, ANIBT_RECEIPT_SCHEMA, AnibtClient, RequestsAnibtClient
+from .anibt import (
+    ANIBT_ADAPTER_VERSION, ANIBT_RECEIPT_SCHEMA, NYAA_TRANSLATED_ANIME_CATEGORY,
+    AnibtClient, RequestsAnibtClient,
+)
 from .anibt_execution import ANIBT_PUBLISH_ARTIFACT_TYPE, ANIBT_PUBLISH_STAGE, run_anibt_publish
 from .credentials import (
     AnibtCredentials, QBittorrentCredentials, R2Credentials,
@@ -29,7 +32,8 @@ from .trackers import LEGACY_TRACKERS, TrackerListClient, resolve_trackers
 __all__ = [
     "ANIBT_ADAPTER_VERSION", "ANIBT_PUBLISH_ARTIFACT_TYPE",
     "ANIBT_PUBLISH_PROFILE_VERSION", "ANIBT_PUBLISH_STAGE",
-    "ANIBT_RECEIPT_SCHEMA", "AnibtClient", "AnibtCredentials",
+    "ANIBT_RECEIPT_SCHEMA", "NYAA_TRANSLATED_ANIME_CATEGORY",
+    "AnibtClient", "AnibtCredentials",
     "AnibtPublishProfile",
     "Boto3R2Client", "LEGACY_TRACKERS",
     "QB_SEED_ARTIFACT_TYPE", "QB_SEED_STAGE",

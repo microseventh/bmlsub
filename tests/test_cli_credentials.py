@@ -119,7 +119,7 @@ class CredentialWizardTests(unittest.TestCase):
     def test_default_publish_plan_is_concise(self):
         plan = {
             "episode_dir": "/series/01",
-            "anibt": {"nyaa": True, "nyaa_category": "1_4"},
+            "anibt": {"nyaa": True, "nyaa_category": "1_3"},
             "config": {
                 "r2_bucket": "bml", "remote_dir": "/host/downloads",
                 "qb_save_path": "/downloads", "r2_credential_profile": "r2",
@@ -142,7 +142,7 @@ class CredentialWizardTests(unittest.TestCase):
         text = output.getvalue()
         self.assertIn("文件交付摘要", text)
         self.assertIn("Nyaa", text)
-        self.assertIn("1_4", text)
+        self.assertIn("1_3", text)
         self.assertNotIn("/very/long/video.mkv", text)
         output = io.StringIO()
         with redirect_stderr(output):

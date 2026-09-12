@@ -8,6 +8,7 @@ import mimetypes
 
 from ..interactive import ui_text
 from ..progress import finish_progress_task, progress_task
+from ..release.anibt import NYAA_TRANSLATED_ANIME_CATEGORY
 from .common import open_workstation
 from ..state.models import ValidationStatus
 from ..state.sqlite_store import SQLiteJobStore
@@ -89,7 +90,7 @@ def plan_publish(episode_dir: Path | str, *, episode_id: str | None = None,
                 "format": "MKV" if key == "mkv_hevc" else "MP4",
                 "subtitle": "INTERNAL" if key == "mkv_hevc" else "EMBEDDED",
                 "nyaa": publish_nyaa,
-                "nyaa_category": "1_4" if publish_nyaa else None,
+                "nyaa_category": NYAA_TRANSLATED_ANIME_CATEGORY if publish_nyaa else None,
             },
         })
     return {
@@ -99,7 +100,10 @@ def plan_publish(episode_dir: Path | str, *, episode_id: str | None = None,
         "episode_dir": str(root), "episode_id": identifier,
         "missing": list(dict.fromkeys(missing)),
         "products": products, "torrents": torrents, "config": config.to_dict(),
-        "anibt": {"nyaa": publish_nyaa, "nyaa_category": "1_4" if publish_nyaa else None},
+        "anibt": {
+            "nyaa": publish_nyaa,
+            "nyaa_category": NYAA_TRANSLATED_ANIME_CATEGORY if publish_nyaa else None,
+        },
         "deliveries": deliveries,
         "external_actions": [
             "publish.upload_r2", "publish.pull_remote",
@@ -367,7 +371,7 @@ def _anibt_profile(config: PublishConfig, episode_id: str, path: Path, product_k
                 "http://nyaa.tracker.wf:7777/announce",
             ],
             "nyaa": True,
-            "nyaa_category": "1_4",
+            "nyaa_category": NYAA_TRANSLATED_ANIME_CATEGORY,
             "nyaa_complete": False,
             "nyaa_remake": False,
         })

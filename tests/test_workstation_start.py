@@ -642,7 +642,7 @@ class WorkstationStartTests(unittest.TestCase):
                 self.assertEqual(profile["subtitle"], subtitle)
                 self.assertEqual(profile["format"], format_name)
                 self.assertTrue(profile["nyaa"])
-                self.assertEqual(profile["nyaa_category"], "1_4")
+                self.assertEqual(profile["nyaa_category"], "1_3")
                 self.assertFalse(profile["nyaa_complete"])
                 self.assertFalse(profile["nyaa_remake"])
                 self.assertIn("http://nyaa.tracker.wf:7777/announce", profile["trackers"])
