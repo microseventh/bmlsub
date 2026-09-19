@@ -2,6 +2,16 @@
 
 All notable changes to `bmlsub` are recorded here.
 
+## 1.3.2 - 2026-09-19
+
+### Installation documentation
+
+- Restore the end-user Git installation command after the native dependency
+  steps: `python -m pip install "git+https://github.com/microseventh/bmlsub.git"`.
+- Add a dedicated guide for installing, verifying, upgrading, and reinstalling
+  the current published GitHub Release assets.
+- Keep editable installation instructions scoped to the development guide.
+
 ## 1.3.1 - 2026-09-19
 
 ### One-off subtitle processing commands

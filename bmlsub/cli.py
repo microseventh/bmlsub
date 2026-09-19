@@ -624,7 +624,7 @@ def _legacy_build_parser() -> argparse.ArgumentParser:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the intentionally small 1.3.1 public command surface."""
+    """Build the intentionally small 1.3.2 public command surface."""
     from .workstation.operations import OPERATION_NAMES
 
     parser = argparse.ArgumentParser(

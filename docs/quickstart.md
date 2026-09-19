@@ -7,10 +7,18 @@ conda create -n bmlsub python=3.12
 conda activate bmlsub
 brew install homebrew-ffmpeg/ffmpeg/ffmpeg
 brew install mkvtoolnix
-python -m pip install -e '.[transcription]'
+python -m pip install "git+https://github.com/microseventh/bmlsub.git"
+bmlsub --version
 ```
 
-如果只执行不含 Whisper 的操作，可以省略 `[transcription]`。运行 `bmlsub --version` 确认安装版本。
+以上命令在系统依赖安装完成后直接从 GitHub 仓库安装 bmlsub。Apple Silicon
+上需要 MLX Whisper 转录时，改用：
+
+```bash
+python -m pip install "bmlsub[transcription] @ git+https://github.com/microseventh/bmlsub.git"
+```
+
+需要固定版本或校验安装包时，参见[从 GitHub Release 安装](release-installation.md)。
 
 ## 准备目录
 

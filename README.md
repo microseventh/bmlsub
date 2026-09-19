@@ -1,4 +1,4 @@
-# bmlsub 1.3.1
+# bmlsub 1.3.2
 
 [GitHub](https://github.com/microseventh/bmlsub) |
 [简体中文](docs/zh/README.md)
@@ -37,18 +37,28 @@ are selected through interactive questions rather than business flags.
 ## Installation
 
 Python 3.10 or newer is required. MLX transcription on Apple Silicon is an
-optional feature.
+optional feature. Install the native dependencies first, then install bmlsub
+directly from GitHub:
 
 ```bash
 conda create -n bmlsub python=3.12
 conda activate bmlsub
 brew install homebrew-ffmpeg/ffmpeg/ffmpeg
 brew install mkvtoolnix
-python -m pip install -e '.[transcription]'
+python -m pip install "git+https://github.com/microseventh/bmlsub.git"
 bmlsub --version
 ```
 
-The expected version output is `bmlsub 1.3.1`.
+The expected version output is `bmlsub 1.3.2`.
+
+To install the optional MLX Whisper integration from GitHub on Apple Silicon:
+
+```bash
+python -m pip install "bmlsub[transcription] @ git+https://github.com/microseventh/bmlsub.git"
+```
+
+For a versioned installation from verified GitHub Release assets, follow the
+[Release installation guide](docs/release-installation.md).
 
 ## Recommended workflow
 
@@ -144,6 +154,7 @@ OpenSSH host alias.
 
 - [Documentation index](docs/README.md)
 - [Quick start](docs/quickstart.md)
+- [Install from a GitHub Release](docs/release-installation.md)
 - [CLI reference](docs/cli.md)
 - [Workstation workflow](docs/workstation.md)
 - [Standalone operations and state](docs/operations.md)
