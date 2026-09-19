@@ -1,8 +1,10 @@
 # bmlsub 中文文档
 
-当前版本：`1.2.3`。
+当前版本：`1.3.1`。
 
 [English README](../../README.md)
+
+[GitHub 仓库](https://github.com/microseventh/bmlsub)
 
 - [快速开始](../quickstart.md)
 - [CLI 参考](../cli.md)

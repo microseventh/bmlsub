@@ -1,6 +1,13 @@
 # 独立操作与状态
 
-`build <option>` 和 `rebuild <option>` 共享 option 注册表，但一次只执行一个独立操作，不会隐式串联下游。文档统一使用完整单词 `option`，避免缩写产生歧义。
+`build <option>` 和 `rebuild <option>` 共享状态化 option 注册表，但一次只执行一个独立操作，不会隐式串联下游。文档统一使用完整单词 `option`，避免缩写产生歧义。
+
+`build` 另外提供两个直接文件操作：`fanhua [file-or-directory]` 和
+`editsub [file-or-directory]`。它们不进入状态化 option 注册表，不创建
+`.bmlsub/build/` 回执，也不支持 `rebuild`。两者的文件夹扫描都不递归。
+
+- `fanhua`：安全地繁化 ASS 对话文字，成品写在源文件旁并按 CHT 规则命名。
+- `editsub`：将 ASS/SRT/VTT 整理成纯文本，成品写在命令启动目录。
 
 ## Option 名称与职责
 

@@ -56,3 +56,24 @@ bmlsub rebuild encode
 ```
 
 每条命令只执行一个操作；需要修改已登记结果时使用同名 `rebuild`。
+
+字幕文件型操作也归在 `build` 下，但不写独立操作回执，也不支持 `rebuild`：
+
+```bash
+bmlsub build fanhua 'episode.chs&jpn.ass'
+bmlsub build editsub 'episode.ja[cc].srt'
+```
+
+`fanhua` 仅处理 ASS，文件夹输入采用非递归扫描，繁化结果写在源文件旁。
+
+## 字幕转纯文本
+
+```bash
+cd /path/to/output-directory
+bmlsub build editsub 'episode.ja[cc].srt'
+```
+
+也可以传入文件夹，或省略路径以处理当前文件夹。输入文件夹只做非递归扫描；
+输出始终位于执行命令时的当前文件夹，命名为 `<stem>_processed.txt`。输出为
+UTF-8 文本，标点及装饰符号会被移除，内部空格统一为日文全角空格，且不会
+保留行尾空格和空白行。

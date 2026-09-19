@@ -624,7 +624,7 @@ def _legacy_build_parser() -> argparse.ArgumentParser:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the intentionally small 1.2.3 public command surface."""
+    """Build the intentionally small 1.3.1 public command surface."""
     from .workstation.operations import OPERATION_NAMES
 
     parser = argparse.ArgumentParser(
@@ -642,12 +642,29 @@ def build_parser() -> argparse.ArgumentParser:
     ws_end.set_defaults(handler=_compact_ws_end)
 
     build = commands.add_parser("build", help="Build exactly one standalone operation")
-    build.add_argument("operation", nargs="?", choices=OPERATION_NAMES)
+    build_operations = build.add_subparsers(dest="operation")
+    for operation in OPERATION_NAMES:
+        build_operations.add_parser(operation)
+    fanhua = build_operations.add_parser(
+        "fanhua", help="Convert Simplified Chinese ASS subtitles to Traditional Chinese",
+    )
+    fanhua.add_argument(
+        "path", nargs="?", type=Path, default=Path("."),
+        help="ASS subtitle file or directory (default: current directory)",
+    )
+    editsub = build_operations.add_parser(
+        "editsub", help="Convert ASS/SRT/VTT subtitles into clean Japanese text",
+    )
+    editsub.add_argument(
+        "path", nargs="?", type=Path, default=Path("."),
+        help="Subtitle file or directory (default: current directory)",
+    )
     build.set_defaults(handler=_compact_build, rebuild=False)
 
     rebuild = commands.add_parser("rebuild", help="Safely replace one recorded operation")
     rebuild.add_argument("operation", nargs="?", choices=OPERATION_NAMES)
     rebuild.set_defaults(handler=_compact_build, rebuild=True)
+
     return parser
 
 
@@ -2312,8 +2329,19 @@ def _compact_ws_end(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _compact_build(args: argparse.Namespace) -> dict[str, Any]:
+    launch_directory = Path.cwd().resolve()
+    if args.operation == "fanhua":
+        from .traditionalization import run_fanhua
+        return run_fanhua(args.path, launch_directory=launch_directory)
+    if args.operation == "editsub":
+        from .editing import run_edit
+        return run_edit(
+            args.path,
+            launch_directory=launch_directory,
+            output_directory=launch_directory,
+        )
     from .workstation.commands import run_operation
-    return run_operation(args.operation, rebuild=bool(args.rebuild), directory=Path.cwd())
+    return run_operation(args.operation, rebuild=bool(args.rebuild), directory=launch_directory)
 
 
 def _exit_code(payload: dict[str, Any]) -> int:

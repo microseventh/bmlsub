@@ -23,6 +23,10 @@ class CompactCliTests(unittest.TestCase):
         self.assertEqual(parser.parse_args(["ws", "start"]).ws_command, "start")
         self.assertIsNone(parser.parse_args(["ws", "end"]).unattended)
         self.assertEqual(parser.parse_args(["ws", "end", "yes"]).unattended, "yes")
+        self.assertEqual(parser.parse_args(["build", "fanhua"]).path, Path("."))
+        self.assertEqual(parser.parse_args(["build", "editsub"]).path, Path("."))
+        self.assertEqual(parser.parse_args(["build", "editsub", "字幕 [cc].srt"]).path,
+                         Path("字幕 [cc].srt"))
         for operation in OPERATION_NAMES:
             self.assertEqual(parser.parse_args(["build", operation]).operation, operation)
             self.assertEqual(parser.parse_args(["rebuild", operation]).operation, operation)
@@ -33,6 +37,8 @@ class CompactCliTests(unittest.TestCase):
             ["workstation", "start"], ["credentials", "list"],
             ["build", "encode", "--input", "x.mkv"],
             ["rebuild", "encode", "extra"], ["ws", "start", "yes"],
+            ["edit"], ["build", "editsub", "one.srt", "two.srt"],
+            ["rebuild", "fanhua"], ["rebuild", "editsub"],
         ):
             with self.subTest(argv=argv), self.assertRaises(SystemExit) as raised:
                 parser.parse_args(argv)

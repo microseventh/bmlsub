@@ -2,6 +2,38 @@
 
 All notable changes to `bmlsub` are recorded here.
 
+## 1.3.1 - 2026-09-19
+
+### One-off subtitle processing commands
+
+- Add two direct, one-off commands under `build`; neither creates standalone
+  operation receipts nor participates in `rebuild`.
+- Add `bmlsub build fanhua [file-or-directory]` for safe ASS-aware Simplified
+  to Traditional conversion, with non-recursive batches, existing CHT output
+  filtering, collision preflight, structure validation, and atomic output.
+- Add `bmlsub build editsub [file-or-directory]` for ASS, SRT, and VTT inputs.
+- Resolve relative inputs from the command launch directory and always write
+  `<stem>_processed.txt` outputs to that launch directory.
+- Apply SubsRefine processing, remove Unicode punctuation/decorative symbols,
+  normalize internal whitespace to U+3000, remove edge spaces and blank lines,
+  and return the line count plus validation checks in the JSON result.
+- Support stable non-recursive directory batches, UTF-8 BOM input, uppercase
+  extensions, atomic output replacement, preflight parsing, and output-name
+  collision rejection.
+- Keep both subtitle utilities under `build` instead of exposing a separate
+  top-level editing command.
+
+### Third-party compliance and verification
+
+- Bundle the SubsRefine core from
+  [commit `c47cec7`](https://github.com/MingYSub/SubsRefine/tree/c47cec799fb5615d74a6561a7b6a91054c669c4b)
+  with a Python 3.10-compatible `StrEnum` shim.
+- Distribute the full SubsRefine MIT license and third-party notice in source,
+  wheel, and sdist artifacts.
+- Verify the real 416-line Japanese subtitle fixture byte-for-byte against the
+  previously validated output and add CLI, format, path, failure, Unicode, and
+  licensing regression tests in the isolated `bmlsub-test` Conda environment.
+
 ## 1.2.3 - 2026-09-12
 
 ### Anibt array compatibility fallback

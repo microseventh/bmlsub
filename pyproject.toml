@@ -1,13 +1,14 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "bmlsub"
-version = "1.2.3"
+version = "1.3.1"
 description = "Reliable local execution core for BML subtitle workflows"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE", "LICENSES/*.txt", "THIRD_PARTY_NOTICES.md"]
 requires-python = ">=3.10"
 authors = [{name = "Billion Meta Lab"}]
 dependencies = [
@@ -19,6 +20,12 @@ dependencies = [
     "keyring>=25,<26",
     "portalocker>=2.8,<4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/microseventh/bmlsub"
+Repository = "https://github.com/microseventh/bmlsub.git"
+Issues = "https://github.com/microseventh/bmlsub/issues"
+Changelog = "https://github.com/microseventh/bmlsub/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 transcription = [

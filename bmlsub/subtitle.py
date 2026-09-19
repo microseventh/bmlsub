@@ -6,6 +6,7 @@ from .version import __version__
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+import re
 from typing import Callable
 from urllib.parse import urlsplit, urlunsplit
 
@@ -52,10 +53,14 @@ class SubtitleConversionOptions:
 
 def derive_cht_path(chs_path: Path | str) -> Path:
     source = Path(chs_path)
-    if ".chs&jpn.ass" in source.name:
-        return source.with_name(source.name.replace(".chs&jpn.ass", ".cht&jpn.ass"))
-    if ".chs.ass" in source.name:
-        return source.with_name(source.name.replace(".chs.ass", ".cht.ass"))
+    if re.search(r"\.chs&jpn\.ass$", source.name, flags=re.IGNORECASE):
+        return source.with_name(re.sub(
+            r"\.chs&jpn\.ass$", ".cht&jpn.ass", source.name, flags=re.IGNORECASE,
+        ))
+    if re.search(r"\.chs\.ass$", source.name, flags=re.IGNORECASE):
+        return source.with_name(re.sub(
+            r"\.chs\.ass$", ".cht.ass", source.name, flags=re.IGNORECASE,
+        ))
     return source.with_name(f"{source.stem}.cht.ass")
 
 

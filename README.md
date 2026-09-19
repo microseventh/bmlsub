@@ -1,5 +1,6 @@
-# bmlsub 1.2.3
+# bmlsub 1.3.1
 
+[GitHub](https://github.com/microseventh/bmlsub) |
 [简体中文](docs/zh/README.md)
 
 `bmlsub` is a local workstation tool for subtitle, transcription, video
@@ -13,6 +14,8 @@ confirmation boundaries.
 bmlsub ws start
 bmlsub ws end [yes]
 bmlsub build [option]
+bmlsub build fanhua [file-or-directory]
+bmlsub build editsub [file-or-directory]
 bmlsub rebuild [option]
 ```
 
@@ -20,11 +23,16 @@ bmlsub rebuild [option]
 - `ws end` starts from the completed subtitles and fonts, produces local releases, and delivers them through R2, VPS, qBittorrent, and Anibt in order.
 - `ws end yes` resumes delivery unattended with saved, validated configuration and automatically confirms Nyaa syndication.
 - `build` runs one standalone operation in the current directory.
+- `build fanhua` converts one ASS file or a non-recursive directory of ASS
+  files from Simplified to Traditional Chinese while preserving ASS structure.
+- `build editsub` converts one ASS/SRT/VTT subtitle or a non-recursive
+  directory of subtitles into validated UTF-8 Japanese text.
 - `rebuild` replaces the result of one standalone operation; `rebuild anibt` is refused because publication cannot be safely overwritten.
 
-The public global options are `-h/--help` and `--version`. Paths, inputs,
-recipes, output locations, and credential references are selected through the
-interactive questions rather than business flags.
+The public global options are `-h/--help` and `--version`. The two subtitle
+file operations intentionally accept one optional file-or-directory path;
+other standalone paths, recipes, output locations, and credential references
+are selected through interactive questions rather than business flags.
 
 ## Installation
 
@@ -40,7 +48,7 @@ python -m pip install -e '.[transcription]'
 bmlsub --version
 ```
 
-The expected version output is `bmlsub 1.2.3`.
+The expected version output is `bmlsub 1.3.1`.
 
 ## Recommended workflow
 
@@ -85,6 +93,41 @@ validates the replacement, and only then writes the new receipt.
 
 See [standalone operations and state](docs/operations.md) for the complete
 input, output, and recovery rules.
+
+## Subtitle text editing
+
+```bash
+# Traditionalize one ASS subtitle or each source ASS in a directory.
+bmlsub build fanhua 'episode.chs&jpn.ass'
+bmlsub build fanhua /path/to/subtitles
+
+# Process supported subtitles in the current directory.
+bmlsub build editsub
+
+# Process one file or one directory. Output still goes to the current directory.
+bmlsub build editsub 'episode.ja[cc].srt'
+bmlsub build editsub /path/to/subtitles
+```
+
+`fanhua` supports ASS input and writes each output beside its source using the
+existing CHT naming rules, such as `episode.chs&jpn.ass` to
+`episode.cht&jpn.ass`. It preserves ASS structure and only converts reliable
+Chinese dialogue segments through the configured Fanhuaji provider.
+
+`editsub` uses the bundled SubsRefine processing core, then removes all
+Unicode punctuation, decorative symbols, and controls. Internal whitespace is
+collapsed to the Japanese ideographic space (`U+3000`); blank lines and edge
+spaces are removed. The JSON result reports the UTF-8 line count and all text
+validation checks. Directory scans are stable, non-recursive, and limited to
+ASS, SRT, and VTT. Relative inputs are resolved from the current directory and
+outputs are written there as `<stem>_processed.txt`. Both operations reject a
+batch before writing if two inputs would map to the same output.
+
+[SubsRefine at the integrated revision](https://github.com/MingYSub/SubsRefine/tree/c47cec799fb5615d74a6561a7b6a91054c669c4b)
+is Copyright (c) 2025 MingYSub and MIT-licensed. Its complete license is
+distributed in `LICENSES/SubsRefine-MIT.txt`; integration details are in
+`THIRD_PARTY_NOTICES.md`. Users remain responsible for the rights to the
+subtitle content they process.
 
 ## State and security
 
