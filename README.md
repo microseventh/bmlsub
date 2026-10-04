@@ -1,4 +1,4 @@
-# bmlsub 1.3.2
+# bmlsub 1.3.4
 
 [GitHub](https://github.com/microseventh/bmlsub) |
 [简体中文](docs/zh/README.md)
@@ -16,6 +16,8 @@ bmlsub ws end [yes]
 bmlsub build [option]
 bmlsub build fanhua [file-or-directory]
 bmlsub build editsub [file-or-directory]
+bmlsub build fonts2en [file-or-directory] [fonts-directory]
+bmlsub build fonts2cn [file-or-directory] [fonts-directory]
 bmlsub rebuild [option]
 ```
 
@@ -27,10 +29,14 @@ bmlsub rebuild [option]
   files from Simplified to Traditional Chinese while preserving ASS structure.
 - `build editsub` converts one ASS/SRT/VTT subtitle or a non-recursive
   directory of subtitles into validated UTF-8 Japanese text.
+- `build fonts2en` and `build fonts2cn` convert ASS style and `\fn` font names
+  using OpenType metadata from a local `fonts` directory. The optional font
+  directory defaults to `<subtitle path>/fonts`.
 - `rebuild` replaces the result of one standalone operation; `rebuild anibt` is refused because publication cannot be safely overwritten.
 
-The public global options are `-h/--help` and `--version`. The two subtitle
-file operations intentionally accept one optional file-or-directory path;
+The public global options are `-h/--help` and `--version`. The standalone
+subtitle file operations intentionally accept optional file-or-directory
+paths;
 other standalone paths, recipes, output locations, and credential references
 are selected through interactive questions rather than business flags.
 
@@ -49,7 +55,7 @@ python -m pip install "git+https://github.com/microseventh/bmlsub.git"
 bmlsub --version
 ```
 
-The expected version output is `bmlsub 1.3.2`.
+The expected version output is `bmlsub 1.3.4`.
 
 To install the optional MLX Whisper integration from GitHub on Apple Silicon:
 
@@ -117,6 +123,13 @@ bmlsub build editsub
 # Process one file or one directory. Output still goes to the current directory.
 bmlsub build editsub 'episode.ja[cc].srt'
 bmlsub build editsub /path/to/subtitles
+
+# Convert ASS font names using /path/to/episode/fonts by default.
+bmlsub build fonts2en '/path/to/episode/subtitle.ass'
+bmlsub build fonts2cn '/path/to/episode/subtitle.english.ass'
+
+# Use a separate font directory explicitly.
+bmlsub build fonts2en '/path/to/subtitles' '/path/to/font-collection'
 ```
 
 `fanhua` supports ASS input and writes each output beside its source using the
@@ -132,6 +145,13 @@ validation checks. Directory scans are stable, non-recursive, and limited to
 ASS, SRT, and VTT. Relative inputs are resolved from the current directory and
 outputs are written there as `<stem>_processed.txt`. Both operations reject a
 batch before writing if two inputs would map to the same output.
+
+`fonts2en` writes `<stem>.english.ass`; `fonts2cn` writes
+`<stem>.chinese.ass`. Both scan only the immediate input directory, preserve
+ASS event structure, and atomically replace validated outputs. Existing
+generated `.english.ass` and `.chinese.ass` files are skipped during directory
+scans. A missing default or explicit font directory is reported with a
+`fonts` path reminder.
 
 [SubsRefine at the integrated revision](https://github.com/MingYSub/SubsRefine/tree/c47cec799fb5615d74a6561a7b6a91054c669c4b)
 is Copyright (c) 2025 MingYSub and MIT-licensed. Its complete license is

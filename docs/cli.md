@@ -14,14 +14,16 @@ bmlsub ws end [yes]
 bmlsub build [option]
 bmlsub build fanhua [file-or-directory]
 bmlsub build editsub [file-or-directory]
+bmlsub build fonts2en [file-or-directory] [fonts-directory]
+bmlsub build fonts2cn [file-or-directory] [fonts-directory]
 bmlsub rebuild [option]
 ```
 
-`option` 必须是 `bgminfo`、`ensub`、`trans`、`pubinfo`、`encode`、`torrent`、
-`upr2`、`dlvps`、`seed`、`anibt` 之一。`bmlsub ws start` 没有业务参数；
+`option` 可以是状态化操作，也可以是文件操作 `fanhua`、`editsub`、
+`fonts2en`、`fonts2cn`。`bmlsub ws start` 没有业务参数；
 `bmlsub ws end` 的可选位置参数只有 `yes`。`build` 和 `rebuild` 的 option
-来自同一份状态化操作注册表。`fanhua` 和 `editsub` 是额外的 `build`
-文件操作，不支持 `rebuild`；路径参数可省略，省略时处理当前目录。
+来自同一份状态化操作注册表。`fanhua`、`editsub`、`fonts2en` 和 `fonts2cn`
+是额外的 `build` 文件操作，不支持 `rebuild`；路径参数可省略，省略时处理当前目录。
 
 ## 字幕繁化
 
@@ -65,6 +67,26 @@ Copyright (c) 2025 MingYSub，采用 MIT License。完整许可见
 `LICENSES/SubsRefine-MIT.txt`，集成来源见 `THIRD_PARTY_NOTICES.md`。该软件
 许可不代表已取得输入字幕内容的版权，用户需自行确认有权处理输入文件。
 
+## ASS 字体名称转换
+
+```bash
+bmlsub build fonts2en
+bmlsub build fonts2en 'episode.ass'
+bmlsub build fonts2en /path/to/subtitles /path/to/fonts
+bmlsub build fonts2cn 'episode.english.ass'
+```
+
+- 第一个路径可以是一个 `.ass` 文件或文件夹；省略时使用当前目录。
+- 第二个路径是可选字体目录；省略时自动查找第一个路径所在目录的
+  `fonts` 文件夹。
+- 字体目录只递归读取 `.ttf`、`.ttc`、`.otf` 和 `.otc` 文件的 OpenType
+  名称表；找不到字体目录或目录没有字体文件时会返回结构化错误，并提示
+  将字体放到默认位置或传入路径。
+- `fonts2en` 输出 `<stem>.english.ass`，`fonts2cn` 输出
+  `<stem>.chinese.ass`；文件夹扫描不递归，并跳过已有的这两类成品。
+- 样式字段和行内 `\fn` 标签都会转换，并保留 `@` 竖排字体标记；输出写入临时文件，
+  验证 ASS 事件结构后再原子替换。
+
 ## 帮助与退出码
 
 ```bash
@@ -73,6 +95,8 @@ bmlsub ws end --help
 bmlsub build --help
 bmlsub build fanhua --help
 bmlsub build editsub --help
+bmlsub build fonts2en --help
+bmlsub build fonts2cn --help
 bmlsub rebuild --help
 ```
 

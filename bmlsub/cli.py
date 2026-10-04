@@ -624,7 +624,7 @@ def _legacy_build_parser() -> argparse.ArgumentParser:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the intentionally small 1.3.2 public command surface."""
+    """Build the intentionally small public command surface."""
     from .workstation.operations import OPERATION_NAMES
 
     parser = argparse.ArgumentParser(
@@ -659,6 +659,19 @@ def build_parser() -> argparse.ArgumentParser:
         "path", nargs="?", type=Path, default=Path("."),
         help="Subtitle file or directory (default: current directory)",
     )
+    for operation, help_text in (
+        ("fonts2en", "Convert ASS font names to English names from local font files"),
+        ("fonts2cn", "Convert ASS font names to Chinese/localized names from local font files"),
+    ):
+        font_conversion = build_operations.add_parser(operation, help=help_text)
+        font_conversion.add_argument(
+            "path", nargs="?", type=Path, default=Path("."),
+            help="ASS file or directory (default: current directory)",
+        )
+        font_conversion.add_argument(
+            "fonts", nargs="?", type=Path,
+            help="optional font directory (default: PATH/fonts)",
+        )
     build.set_defaults(handler=_compact_build, rebuild=False)
 
     rebuild = commands.add_parser("rebuild", help="Safely replace one recorded operation")
@@ -2339,6 +2352,14 @@ def _compact_build(args: argparse.Namespace) -> dict[str, Any]:
             args.path,
             launch_directory=launch_directory,
             output_directory=launch_directory,
+        )
+    if args.operation in {"fonts2en", "fonts2cn"}:
+        from .font_conversion import run_font_conversion
+        return run_font_conversion(
+            args.path,
+            fonts=args.fonts,
+            to_chinese=args.operation == "fonts2cn",
+            launch_directory=launch_directory,
         )
     from .workstation.commands import run_operation
     return run_operation(args.operation, rebuild=bool(args.rebuild), directory=launch_directory)

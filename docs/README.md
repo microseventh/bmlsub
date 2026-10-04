@@ -1,6 +1,6 @@
 # bmlsub 文档
 
-当前仓库源码和通用 CLI 文档版本为 bmlsub 1.3.2；最新已发布的稳定
+当前仓库源码和通用 CLI 文档版本为 bmlsub 1.3.4；最新已发布的稳定
 Release 为 [`v1.3.1`](https://github.com/microseventh/bmlsub/releases/tag/v1.3.1)，
 其安装方式和校验摘要单独记录在 Release 安装指南中。
 

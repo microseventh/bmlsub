@@ -2,6 +2,23 @@
 
 All notable changes to `bmlsub` are recorded here.
 
+## 1.3.4 - 2026-10-04
+
+### ASS font-name conversion
+
+- Add `bmlsub build fonts2en [file-or-directory] [fonts-directory]` to convert
+  ASS style and `\fn` font names to English OpenType names.
+- Add `bmlsub build fonts2cn [file-or-directory] [fonts-directory]` to restore
+  Chinese/localized names from the same font metadata.
+- Discover the default `fonts` directory beside the input, support explicit
+  font directories, TTC collections, non-recursive ASS batches, generated
+  output filtering, structured missing-font errors, and atomic ASS output.
+- Add CLI, conversion, directory, and error regression coverage.
+- Preserve ASS/Aegisub `@` vertical-font markers during conversion.
+- Match localized and English full names per font variant, including W15,
+  W22, and W24, instead of collapsing them to a family name.
+- Leave Japanese-only fonts such as Dream Han Serif JP unchanged.
+
 ## 1.3.2 - 2026-09-19
 
 ### Installation documentation

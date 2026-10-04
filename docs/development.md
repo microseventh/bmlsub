@@ -33,6 +33,7 @@ tar -tzf dist/*.tar.gz | grep -Ei 'SubsRefine|license|notice'
 - `bmlsub/cli.py`：紧凑公开 CLI 和交互入口。
 - `bmlsub/editing.py`：`build editsub` 的路径解析、固定后处理、验证和原子输出。
 - `bmlsub/traditionalization.py`：`build fanhua` 的批量发现、ASS 验证和原子输出。
+- `bmlsub/font_conversion.py`：`build fonts2en/fonts2cn` 的字体元数据扫描、双向名称转换、ASS 验证和原子输出。
 - `bmlsub/_vendor/subsrefine/`：固定提交的 SubsRefine MIT 许可处理核心。
 - `bmlsub/workstation/`：Workstation 阶段、问题菜单、计划和状态。
 - `bmlsub/workstation/operations.py`：独立操作注册表。

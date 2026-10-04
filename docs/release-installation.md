@@ -3,7 +3,7 @@
 Release 安装适合需要固定版本、可重复部署或核对安装包摘要的用户。当前已发布稳定版为
 [`v1.3.1`](https://github.com/microseventh/bmlsub/releases/tag/v1.3.1)。
 
-仓库源码当前版本为 `1.3.2`；该版本尚未发布 Release。需要安装当前源码版时，
+仓库源码当前版本为 `1.3.4`；该版本尚未发布 Release。需要安装当前源码版时，
 使用[快速开始](quickstart.md)中的 Git 安装命令。
 
 ## 准备环境和系统依赖
