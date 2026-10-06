@@ -14,7 +14,7 @@ from ..production.profiles import (
 from ..interactive import ui_text
 from ..progress import finish_progress_task, progress_task
 from ..release.profiles import normalize_torrent_profile
-from ..state.fingerprints import fingerprint_file, fingerprint_parameters, fingerprint_tools, hash_json
+from ..state.fingerprints import artifact_matches, fingerprint_file, fingerprint_parameters, fingerprint_tools, hash_json
 from ..state.models import Diagnostic, StageInputBinding
 from ..subtitle import SubtitleConversionOptions, run_subtitle_conversion
 from .common import (
@@ -232,35 +232,67 @@ def validate_translation_delivery(episode_dir: Path | str, *, episode_id: str | 
     )
     workstation = open_workstation(config)
     manifest = load_manifest(root)
+
+    def registration_failure(result: dict[str, Any]) -> dict[str, Any]:
+        payload = pipeline_payload_step(
+            root, workflow_id=config.workflow_id, phase="translation",
+            step="translation.validate_delivery", payload=result,
+        )
+        refresh_summary(root)
+        return payload
+
     video_id = manifest.get("source", {}).get("video_artifact_id")
-    if not video_id:
+    video = workstation.store.get_artifact(video_id) if video_id else None
+    # Keep an existing current source identity, even if start registered extra
+    # extraction purposes. Missing/drifted IDs are independently registered.
+    if (force or video is None or video.episode_id != identifier
+            or video.artifact_type != "source.video"
+            or video.path != Path(plan["source_video"]) or not artifact_matches(video)):
         registered = workstation.pipeline.register_video(
             Path(plan["source_video"]), workspace=root, episode_id=identifier,
             purposes=("source", "encode_source", "hardsub_source", "package_source"),
             default_for=("source", "encode_source", "hardsub_source", "package_source"), force=force,
         )
+        if registered["status"] not in {"succeeded", "skipped"}:
+            return registration_failure(registered)
         video_id = registered["artifacts"][0]["artifact_id"]
         update_manifest(root, source={"video_artifact_id": video_id})
     subtitle_result = workstation.pipeline.register_subtitle(
         Path(plan["production_subtitle"]), workspace=root, episode_id=identifier,
         language="zh-hans", force=force,
     )
+    if subtitle_result["status"] not in {"succeeded", "skipped"}:
+        return registration_failure(subtitle_result)
     subtitle_id = subtitle_result["artifacts"][0]["artifact_id"]
     subtitle_updates = {
         "chs_source_artifact_id": subtitle_id,
         "cht_source_artifact_id": None,
     }
-    if plan["traditional_subtitle"]:
+    delivered_cht_id = manifest.get("subtitles", {}).get("cht_delivery_artifact_id")
+    delivered_cht = workstation.store.get_artifact(delivered_cht_id) if delivered_cht_id else None
+    generated_cht = (
+        delivered_cht is not None
+        and delivered_cht.artifact_type == "workstation.subtitle.delivery.cht"
+        and str(delivered_cht.path) == plan["traditional_subtitle"]
+        and artifact_matches(delivered_cht)
+    )
+    # Unedited generated CHT stays managed by conversion. Treating our own
+    # published copy as manual input would change IDs on every resumed run.
+    if plan["traditional_subtitle"] and not generated_cht:
         traditional_result = workstation.pipeline.register_subtitle(
             Path(plan["traditional_subtitle"]), workspace=root, episode_id=identifier,
             language="zh-hant", force=force,
         )
+        if traditional_result["status"] not in {"succeeded", "skipped"}:
+            return registration_failure(traditional_result)
         subtitle_updates["cht_source_artifact_id"] = traditional_result["artifacts"][0]["artifact_id"]
     font_ids = []
     for font in plan["fonts"]:
         registered = workstation.pipeline.register_font(
             Path(font), workspace=root, episode_id=identifier, force=force
         )
+        if registered["status"] not in {"succeeded", "skipped"}:
+            return registration_failure(registered)
         font_ids.append(registered["artifacts"][0]["artifact_id"])
     update_manifest(root, subtitles=subtitle_updates,
                     fonts={"artifact_ids": font_ids})
@@ -482,6 +514,7 @@ def run_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
             subtitle_artifact_id=subtitle_ids[0] if operation == "hardsub" else None,
             font_artifact_ids=font_ids if operation == "hardsub" else (),
             output_profile=profile, output_target=target, parameters=parameters,
+            reuse_existing=True,
         )
         requests[key] = created["request"]
         label = _PRODUCTION_PROGRESS_LABELS[key]
@@ -513,6 +546,7 @@ def run_delivery(episode_dir: Path | str, *, episode_id: str | None = None,
             font_artifact_ids=font_ids, output_profile="mkv-subtitle",
             output_target=products[ProductKind.MKV_HEVC.value],
             parameters={"default_subtitle_ordinal": 0},
+            reuse_existing=True,
         )
         with progress_task(
             phase="delivery", step="delivery.mux_subtitles",

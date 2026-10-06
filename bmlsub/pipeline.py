@@ -528,7 +528,7 @@ class Pipeline:
         chapter_artifact_id: str | None = None,
         attachment_artifact_ids: tuple[str, ...] = (), output_profile: str = "hevc-10bit",
         output_target: Path | str | None = None,
-        parameters: dict[str, Any] | None = None,
+        parameters: dict[str, Any] | None = None, reuse_existing: bool = False,
     ) -> dict[str, Any]:
         request = create_production_request(
             workspace=workspace, episode_id=episode_id,
@@ -541,6 +541,7 @@ class Pipeline:
             attachment_artifact_ids=attachment_artifact_ids,
             output_profile=output_profile, output_target=output_target,
             parameters=parameters, store=self.store, state_dir=self.state_dir,
+            reuse_existing=reuse_existing,
         )
         return {"status": "succeeded", "request": request.to_dict()}
 

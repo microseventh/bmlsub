@@ -506,8 +506,8 @@ def series_metadata_template_guide() -> dict[str, Any]:
         "required_fields": [item["path"] for item in fields if item["required"]],
         "fields": [dict(item) for item in fields],
         "instructions": {
-            "zh": "填写模板后再运行 bmlsub ws start；验证通过后会自动生成 bgminfo/series.json。不要写入密码、token 或密钥。",
-            "en": "Complete the template and rerun bmlsub ws start; validation promotes it to bgminfo/series.json automatically. Do not store passwords, tokens, or keys in it.",
+            "zh": "填写模板后重新运行当前 ws 命令（start 或 end）；验证通过后会自动生成 bgminfo/series.json。不要写入密码、token 或密钥。",
+            "en": "Complete the template and rerun the current ws command (start or end); validation promotes it to bgminfo/series.json automatically. Do not store passwords, tokens, or keys in it.",
         },
     }
 

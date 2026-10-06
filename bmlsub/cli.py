@@ -475,7 +475,7 @@ def _legacy_build_parser() -> argparse.ArgumentParser:
                           help="Re-evaluate all stages and reuse valid fingerprints (default)")
     workstation_start_delivery.add_argument("--confirm-external-action", action="store_true")
     workstation_start_delivery.add_argument("--force", action="store_true")
-    workstation_start_delivery.set_defaults(handler=_workstation_start_delivery)
+    workstation_start_delivery.set_defaults(handler=_workstation_end_publish)
     workstation_rebuild = workstation_commands.add_parser(
         "rebuild", help="Force-rebuild one local workstation stage without publishing"
     )
@@ -1292,10 +1292,12 @@ def _confirm_stderr(prompt: str, *, default: bool = False) -> bool:
     return value in {"y", "yes"}
 
 
-def _workstation_start(args: argparse.Namespace) -> dict[str, Any]:
-    _ensure_ui_language()
+def _prepare_series_workspace(
+    args: argparse.Namespace, *, unattended: bool = False,
+) -> dict[str, Any]:
+    """Shared metadata setup; never inspect or dispatch an episode workflow."""
     from .workstation import (
-        execute_recommended_action, inspect_episode_stage, inspect_series_workspace,
+        inspect_series_workspace,
         promote_series_metadata_template, prompt_series_metadata, resolve_series_root,
         series_metadata_template_guide,
         write_series_metadata_template,
@@ -1328,7 +1330,7 @@ def _workstation_start(args: argparse.Namespace) -> dict[str, Any]:
                 "template_guide": series_metadata_template_guide(),
                 "next_action": "complete_template_and_rerun",
             }
-        if sys.stdin.isatty():
+        if not unattended and sys.stdin.isatty():
             initialization = _prompt_series_initialization_mode()
             if initialization == "template":
                 template = write_series_metadata_template(root)
@@ -1370,7 +1372,7 @@ def _workstation_start(args: argparse.Namespace) -> dict[str, Any]:
         codes = {item.get("code") for item in series["blocking"]}
         if "series_traditionalization_pending" in codes:
             should_retry = args.retry_traditionalization
-            if not should_retry and sys.stdin.isatty():
+            if not should_retry and not unattended and sys.stdin.isatty():
                 should_retry = _confirm_stderr(ui_text(
                     "重试未完成的繁体番名或制作组名称转换",
                     "Retry the incomplete Traditional Chinese series or release group name conversion",
@@ -1389,6 +1391,19 @@ def _workstation_start(args: argparse.Namespace) -> dict[str, Any]:
                 series = inspect_series_workspace(root)
         if series["status"] != "succeeded":
             return series
+    return series
+
+
+def _workstation_start(args: argparse.Namespace) -> dict[str, Any]:
+    _ensure_ui_language()
+    from .workstation import execute_recommended_action, inspect_episode_stage
+    series = _prepare_series_workspace(args)
+    if series["status"] != "succeeded":
+        return series
+    root = Path(series["series_root"])
+    launch_dir = (
+        Path.cwd() if args.series_root is None else Path(args.series_root).expanduser()
+    ).resolve()
     episodes = series["episodes"]
     episode_id = args.episode_id
     if episode_id is None and launch_dir.name.isdigit():
@@ -1845,40 +1860,33 @@ def _select_nyaa_syndication(*, unattended: bool) -> bool:
     ))
 
 
-def _workstation_start_delivery(args: argparse.Namespace) -> dict[str, Any]:
-    _ensure_ui_language()
+def _workstation_end_publish(args: argparse.Namespace) -> dict[str, Any]:
+    """Publish registered products without consulting preprocessing state."""
+    if not getattr(args, "language_resolved", False):
+        if args.yes:
+            set_ui_language("zh")
+        else:
+            _ensure_ui_language()
     from .workstation import (
         PublishConfig, WorkstationConfig, discover_episode_directories,
-        discover_series_context, inspect_episode_stage,
-        plan_publish, resolve_series_root, run_publish,
+        discover_series_context, plan_publish, resolve_series_root, run_publish,
     )
     root = resolve_series_root(args.series_root)
     print(ui_text(f"番组根目录: {root}", f"Series root: {root}"), file=sys.stderr)
     episodes = discover_episode_directories(root)
     episode_id = args.episode_id
     if episode_id is None:
-        if not sys.stdin.isatty():
-            return {"status": "needs_review", "series_root": str(root),
-                    "next_action": "provide_episode_id"}
-        print(ui_text("可用单集目录:", "Available episode directories:"), file=sys.stderr)
-        for index, item in enumerate(episodes, 1):
-            print(f"  {index}. {item.name}  {item}", file=sys.stderr)
-        selected = _prompt_stderr(ui_text("请选择序号或输入单集目录名: ", "Select a number or enter an episode directory name: "))
-        episode_id = (episodes[int(selected) - 1].name
-                      if selected.isdigit() and 1 <= int(selected) <= len(episodes)
-                      else selected)
-    inspection = inspect_episode_stage(root, episode_id)
+        episode_id = _compact_episode_selection(root, unattended=args.yes)
+    selected = next((item for item in episodes if item.name == episode_id), None)
+    if selected is None:
+        return {"status": "needs_review", "series_root": str(root),
+                "next_action": "select_episode_directory"}
+    context = discover_series_context(selected)
+    inspection = {
+        "episode_dir": str(context.episode_dir), "episode_id": context.episode_id,
+        "metadata_path": str(context.metadata.path), "series_root": str(context.series_root),
+    }
     print(ui_text(f"本次文件交付目录: {inspection['episode_dir']}", f"File delivery episode directory: {inspection['episode_dir']}"), file=sys.stderr)
-    if inspection.get("detected_phase") not in {"publish", "complete"}:
-        return {
-            "status": "needs_review", "inspection": inspection,
-            "error": {
-                "code": "local_production_incomplete",
-                "message": "complete local production before starting file delivery",
-            },
-            "recommended_command": "bmlsub ws start",
-            "next_action": "complete_local_production",
-        }
     def effective_publish_config(explicit: PublishConfig | None = None) -> PublishConfig:
         config = explicit or WorkstationConfig.from_series_context(
             discover_series_context(inspection["episode_dir"]),
@@ -1909,7 +1917,7 @@ def _workstation_start_delivery(args: argparse.Namespace) -> dict[str, Any]:
             "next_action": "repair_credential_manifest",
         }
     configure = args.configure or (credential_status["status"] != "succeeded" and not args.yes)
-    if not configure and plan["status"] != "succeeded" and sys.stdin.isatty():
+    if not configure and not args.yes and plan["status"] != "succeeded" and sys.stdin.isatty():
         configure = _confirm_stderr(ui_text(
             "文件交付配置不完整，进入配置向导",
             "The file delivery configuration is incomplete. Open the configuration wizard",
@@ -2232,7 +2240,7 @@ def _show_run(args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
-def _compact_start_namespace(*, command: str, execute: bool) -> argparse.Namespace:
+def _workspace_setup_namespace(*, command: str, execute: bool) -> argparse.Namespace:
     return argparse.Namespace(
         command=command,
         series_root=None,
@@ -2258,10 +2266,10 @@ def _compact_start_namespace(*, command: str, execute: bool) -> argparse.Namespa
 
 
 def _compact_ws_start(args: argparse.Namespace) -> dict[str, Any]:
-    return _workstation_start(_compact_start_namespace(command="ws", execute=False))
+    return _workstation_start(_workspace_setup_namespace(command="ws", execute=False))
 
 
-def _compact_episode_selection(root: Path) -> str | None:
+def _compact_episode_selection(root: Path, *, unattended: bool = False) -> str | None:
     from .workstation import discover_episode_directories
     episodes = discover_episode_directories(root)
     launch = Path.cwd().resolve()
@@ -2269,7 +2277,7 @@ def _compact_episode_selection(root: Path) -> str | None:
         return launch.name
     if len(episodes) == 1:
         return episodes[0].name
-    if not sys.stdin.isatty():
+    if unattended or not sys.stdin.isatty():
         return None
     print(ui_text("可用单集目录:", "Available episode directories:"), file=sys.stderr)
     for index, episode in enumerate(episodes, 1):
@@ -2284,61 +2292,83 @@ def _compact_episode_selection(root: Path) -> str | None:
 
 
 def _compact_ws_end(args: argparse.Namespace) -> dict[str, Any]:
-    from .workstation import inspect_episode_stage, resolve_series_root
-    root = resolve_series_root()
-    episode_id = _compact_episode_selection(root)
+    """Produce and publish from formal inputs, independently of ws start."""
+    from .workstation import plan_delivery_execution, run_delivery
+    unattended = args.unattended == "yes"
+    if unattended:
+        set_ui_language("zh")
+    else:
+        _ensure_ui_language()
+    setup_args = _workspace_setup_namespace(command="ws_end", execute=unattended)
+    series = _prepare_series_workspace(setup_args, unattended=unattended)
+    if series["status"] != "succeeded":
+        return series
+    root = Path(series["series_root"])
+    episode_id = _compact_episode_selection(root, unattended=unattended)
     if episode_id is None:
         return {
             "status": "needs_review", "series_root": str(root),
+            "episodes": series["episodes"],
             "error": {"code": "episode_selection_required",
-                      "message": "select one episode in an interactive terminal"},
-            "next_action": "bmlsub ws end",
+                      "message": "run ws end from a single numeric episode directory"},
+            "next_action": "select_episode_directory",
         }
-    inspection = inspect_episode_stage(root, episode_id)
-    if inspection.get("detected_phase") not in {"local_production", "publish", "complete"}:
+    candidates = {item["episode_id"]: Path(item["episode_dir"])
+                  for item in series["episodes"]}
+    if episode_id not in candidates:
         return {
-            "status": "needs_review", "inspection": inspection,
-            "error": {"code": "workstation_start_incomplete",
-                      "message": "formal subtitles and fonts must be ready before ws end"},
-            "next_action": "bmlsub ws start",
+            "status": "needs_review", "series_root": str(root),
+            "error": {"code": "episode_selection_invalid",
+                      "message": "select a direct numeric episode directory"},
+            "next_action": "select_episode_directory",
         }
-
-    unattended = args.unattended == "yes"
-    local_result: dict[str, Any] | None = None
-    if inspection.get("detected_phase") == "local_production":
-        local_args = _compact_start_namespace(
-            command="ws_end_internal", execute=unattended,
-        )
-        local_args.series_root = root
-        local_args.episode_id = episode_id
-        local_result = _workstation_start(local_args)
-        if local_result.get("status") not in {"succeeded", "skipped"}:
-            return local_result
-        inspection = inspect_episode_stage(root, episode_id)
-        if inspection.get("detected_phase") not in {"publish", "complete"}:
-            return {
-                "status": "needs_review", "local": local_result,
-                "inspection": inspection, "next_action": "bmlsub ws end",
-            }
-
-    delivery_args = argparse.Namespace(
-        series_root=root,
-        episode_id=episode_id,
-        publish_config_json=None,
-        configure=False,
-        credential_manifest=None,
-        execute=unattended,
-        yes=unattended,
-        verbose_plan=False,
-        resume=True,
-        restart=False,
-        confirm_external_action=unattended,
-        force=False,
+    episode_dir = candidates[episode_id]
+    selection = _delivery_selection_from_args(
+        setup_args, interactive=not unattended and sys.stdin.isatty(),
     )
-    external_result = _workstation_start_delivery(delivery_args)
-    if local_result is not None:
-        external_result = {**external_result, "local_delivery": local_result}
-    return external_result
+    # ws end consumes the formal handoff, never a lone AI/reference ASS that
+    # the more general delivery API may accept as an explicitly selected input.
+    formal_name = f"{episode_id}.chs&jpn.ass"
+    has_formal = any(item.is_file() and item.name.lower() == formal_name.lower()
+                     for item in episode_dir.iterdir())
+    plan = plan_delivery_execution(
+        episode_dir, episode_id=episode_id, selection=selection,
+        production_subtitle=None if has_formal else episode_dir / formal_name,
+    )
+    _print_delivery_plan(plan)
+    if plan["status"] != "succeeded":
+        return {
+            "status": "needs_review", "plan": plan,
+            "error": {"code": "delivery_inputs_incomplete",
+                      "message": "resolve the missing or ambiguous local production inputs",
+                      "details": plan["errors"]},
+            "next_action": "resolve_delivery_inputs",
+        }
+    confirmed = unattended
+    if not confirmed and sys.stdin.isatty():
+        confirmed = _confirm_stderr(ui_text(
+            "按以上方案执行本地压制", "Run local production using the plan above",
+        ))
+    if not confirmed:
+        return {"status": "awaiting_confirmation", "plan": plan,
+                "next_action": "confirm_delivery_plan"}
+    # Validate current inputs/configuration through fingerprinted production
+    # stages on resume too; each stage decides whether its output is reusable.
+    local_result = run_delivery(
+        episode_dir, episode_id=episode_id, selection=selection,
+        production_subtitle=plan["production_subtitle"],
+    )
+    if local_result.get("status") not in {"succeeded", "skipped"}:
+        return local_result
+    delivery_args = argparse.Namespace(
+        series_root=root, episode_id=episode_id,
+        publish_config_json=None, configure=False, credential_manifest=None,
+        execute=unattended, yes=unattended, verbose_plan=False,
+        resume=True, restart=False, confirm_external_action=unattended,
+        force=False, language_resolved=True,
+    )
+    external_result = _workstation_end_publish(delivery_args)
+    return {**external_result, "local_delivery": local_result}
 
 
 def _compact_build(args: argparse.Namespace) -> dict[str, Any]:

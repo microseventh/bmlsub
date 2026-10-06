@@ -53,7 +53,8 @@ def create_production_request(*, workspace: Path | str, episode_id: str,
                               output_target: Path | str | None = None,
                               parameters: Mapping[str, Any] | None = None,
                               store: SQLiteJobStore | None = None,
-                              state_dir: Path | str | None = None) -> ProductionRequestRecord:
+                              state_dir: Path | str | None = None,
+                              reuse_existing: bool = False) -> ProductionRequestRecord:
     root = Path(workspace).expanduser().resolve()
     if not episode_id.strip():
         raise ValueError("episode_id must not be empty")
@@ -127,6 +128,23 @@ def create_production_request(*, workspace: Path | str, episode_id: str,
         updated_at=timestamp,
         inputs=tuple(inputs),
     )
+    if reuse_existing:
+        # Execution fingerprints include request_id. Preserve the ID of an
+        # equivalent request so repeated workstation delivery can reuse its
+        # Stage; the executor still verifies inputs, tools and output files.
+        expected_inputs = sorted(
+            (item.input_role, item.ordinal, item.artifact_id) for item in record.inputs
+        )
+        for previous in ledger.list_production_requests(episode_id=episode_id):
+            if (previous.status is not ProductionRequestStatus.RUNNING
+                    and previous.workspace_path == record.workspace_path
+                    and previous.operation == record.operation
+                    and previous.output_profile == record.output_profile
+                    and previous.output_target == record.output_target
+                    and previous.parameters == record.parameters
+                    and sorted((item.input_role, item.ordinal, item.artifact_id)
+                               for item in previous.inputs) == expected_inputs):
+                return previous
     return ledger.create_production_request(record)
 
 

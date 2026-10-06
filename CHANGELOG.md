@@ -2,6 +2,25 @@
 
 All notable changes to `bmlsub` are recorded here.
 
+## 1.3.5 - 2026-10-06
+
+### Independent workstation delivery
+
+- Decouple `ws end [yes]` from `ws start` dispatch and preprocessing state.
+  Initialize and register formal production inputs directly, including fresh
+  workspaces and workspaces with failed or interrupted preprocessing history.
+- Share series metadata setup and template promotion between both commands;
+  report actual missing inputs instead of requiring `ws start`.
+- Resolve language once for interactive `end`; keep `end yes` noninteractive
+  even in a TTY, reporting missing episode/configuration choices explicitly.
+- Validate current video identities and preserve existing valid registrations.
+  Reuse equivalent delivery production requests so resume retains legacy
+  request fingerprints and avoids unnecessary re-encoding.
+- Keep generated CHT copies managed across resume while preserving human edits.
+  Return registration errors before consuming missing output Artifacts.
+- Add independent entry-point, history, input error, confirmation, template,
+  real media registration, local production and resume regression tests.
+
 ## 1.3.4 - 2026-10-04
 
 ### ASS font-name conversion

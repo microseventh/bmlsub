@@ -109,6 +109,14 @@ def discover_source_video(workspace: Path | str, explicit: Path | str | None = N
 def production_subtitle_candidates(workspace: Path | str, episode_id: str,
                                    reference_paths: tuple[Path, ...] = ()) -> tuple[Path, ...]:
     root = Path(workspace).expanduser().resolve()
+    # A formal, explicitly named handoff takes precedence over old reference
+    # records, including records left by a failed preprocessing attempt.
+    exact = tuple(sorted(
+        item.resolve() for item in root.iterdir()
+        if item.is_file() and item.name.lower() == f"{episode_id}.chs&jpn.ass".lower()
+    ))
+    if exact:
+        return exact
     references = {item.resolve() for item in reference_paths}
     values = []
     for item in root.glob("*.ass"):
@@ -117,9 +125,6 @@ def production_subtitle_candidates(workspace: Path | str, episode_id: str,
         if resolved in references or ".en.ass" in name or ".eng.ass" in name or ".cht" in name:
             continue
         values.append(resolved)
-    exact = root / f"{episode_id}.chs&jpn.ass"
-    if exact.resolve() in values:
-        return (exact.resolve(),)
     return tuple(sorted(values))
 
 

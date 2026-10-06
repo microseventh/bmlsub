@@ -1,8 +1,8 @@
 # bmlsub 中文文档
 
-当前仓库源码版本：`1.3.4`（尚未发布 Release）。
+当前仓库源码版本：`1.3.5`。
 
-最新稳定 Release：[`v1.3.1`](https://github.com/microseventh/bmlsub/releases/tag/v1.3.1)。
+最新稳定 Release：[`v1.3.5`](https://github.com/microseventh/bmlsub/releases/tag/v1.3.5)。
 
 [English README](../../README.md)
 

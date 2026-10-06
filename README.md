@@ -1,6 +1,7 @@
-# bmlsub 1.3.4
+# bmlsub 1.3.5
 
 [GitHub](https://github.com/microseventh/bmlsub) |
+[Stable release: v1.3.5](https://github.com/microseventh/bmlsub/releases/tag/v1.3.5) |
 [简体中文](docs/zh/README.md)
 
 `bmlsub` is a local workstation tool for subtitle, transcription, video
@@ -22,7 +23,7 @@ bmlsub rebuild [option]
 ```
 
 - `ws start` initializes a series, registers source media, extracts reference subtitles and audio, and optionally runs transcription before the human subtitle handoff.
-- `ws end` starts from the completed subtitles and fonts, produces local releases, and delivers them through R2, VPS, qBittorrent, and Anibt in order.
+- `ws end` independently initializes from source video, formal subtitles, fonts and series metadata, produces local releases, and delivers them through R2, VPS, qBittorrent, and Anibt in order. It does not require `ws start` or successful preprocessing.
 - `ws end yes` resumes delivery unattended with saved, validated configuration and automatically confirms Nyaa syndication.
 - `build` runs one standalone operation in the current directory.
 - `build fanhua` converts one ASS file or a non-recursive directory of ASS
@@ -55,7 +56,7 @@ python -m pip install "git+https://github.com/microseventh/bmlsub.git"
 bmlsub --version
 ```
 
-The expected version output is `bmlsub 1.3.4`.
+The expected version output is `bmlsub 1.3.5`.
 
 To install the optional MLX Whisper integration from GitHub on Apple Silicon:
 
@@ -85,7 +86,10 @@ direct or chunked Whisper according to the selected policy.
 After translation, proofreading, and font collection, place the formal ASS
 subtitle and fonts in the episode directory, then run `bmlsub ws end`. The
 delivery plan is shown before any R2, VPS, qBittorrent, or Anibt action and
-requires confirmation.
+requires confirmation. If formal inputs are already prepared, you can run
+`ws end` directly without running `ws start`; historical preprocessing failures
+do not block production. `ws end yes` uses Chinese and full production defaults
+without menus; missing inputs or configuration are reported for correction.
 
 ## Standalone operations
 

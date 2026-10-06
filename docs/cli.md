@@ -25,6 +25,11 @@ bmlsub rebuild [option]
 来自同一份状态化操作注册表。`fanhua`、`editsub`、`fonts2en` 和 `fonts2cn`
 是额外的 `build` 文件操作，不支持 `rebuild`；路径参数可省略，省略时处理当前目录。
 
+`ws start` 负责翻译准备；`ws end [yes]` 独立完成正式输入登记、本地制作和发布，
+不要求先运行 `start` 或完成预处理。建议在数字单集目录执行。
+`end` 保留交互与执行确认，`end yes` 默认中文、完整制作并自动确认；
+缺实际输入／配置或无法确定单集时，返回具体诊断，不退回 `start`。
+
 ## 字幕繁化
 
 ```bash

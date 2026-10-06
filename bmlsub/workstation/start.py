@@ -30,9 +30,12 @@ def resolve_series_root(value: Path | str | None = None) -> Path:
     resolved = candidate.resolve()
     if not resolved.is_dir():
         raise ValueError("series root directory does not exist")
-    if (resolved / "bgminfo" / "series.json").is_file():
+    metadata_names = ("series.json", "series.template.json")
+    if any((resolved / "bgminfo" / name).is_file() for name in metadata_names):
         return resolved
-    if resolved.name.isdigit() and (resolved.parent / "bgminfo" / "series.json").is_file():
+    if resolved.name.isdigit() and any(
+        (resolved.parent / "bgminfo" / name).is_file() for name in metadata_names
+    ):
         return resolved.parent
     return resolved
 
