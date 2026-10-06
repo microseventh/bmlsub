@@ -2,6 +2,15 @@
 
 All notable changes to `bmlsub` are recorded here.
 
+## 1.3.5.1 - 2026-10-06
+
+### Stable release metadata
+
+- Publish English release notes and update stable release and installation
+  links to v1.3.5.1.
+- Retain the independent workstation delivery behavior and recovery fixes
+  from 1.3.5 without additional workflow changes.
+
 ## 1.3.5 - 2026-10-06
 
 ### Independent workstation delivery

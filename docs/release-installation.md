@@ -1,9 +1,9 @@
 # 从 GitHub Release 安装
 
 Release 安装适合需要固定版本、可重复部署或核对安装包摘要的用户。当前已发布稳定版为
-[`v1.3.5`](https://github.com/microseventh/bmlsub/releases/tag/v1.3.5)。
+[`v1.3.5.1`](https://github.com/microseventh/bmlsub/releases/tag/v1.3.5.1)。
 
-仓库源码与稳定 Release 版本均为 `1.3.5`。需要安装当前源码版时，
+仓库源码与稳定 Release 版本均为 `1.3.5.1`。需要安装当前源码版时，
 使用[快速开始](quickstart.md)中的 Git 安装命令。
 
 ## 准备环境和系统依赖
@@ -23,20 +23,20 @@ python -m pip install --upgrade pip
 使用 Release 页面中经过验证的通用 wheel：
 
 ```bash
-python -m pip install "https://github.com/microseventh/bmlsub/releases/download/v1.3.5/bmlsub-1.3.5-py3-none-any.whl"
+python -m pip install "https://github.com/microseventh/bmlsub/releases/download/v1.3.5.1/bmlsub-1.3.5.1-py3-none-any.whl"
 bmlsub --version
 ```
 
 版本输出应为：
 
 ```text
-bmlsub 1.3.5
+bmlsub 1.3.5.1
 ```
 
 Apple Silicon 上需要 MLX Whisper 转录时，可在安装 URL 前声明可选依赖：
 
 ```bash
-python -m pip install "bmlsub[transcription] @ https://github.com/microseventh/bmlsub/releases/download/v1.3.5/bmlsub-1.3.5-py3-none-any.whl"
+python -m pip install "bmlsub[transcription] @ https://github.com/microseventh/bmlsub/releases/download/v1.3.5.1/bmlsub-1.3.5.1-py3-none-any.whl"
 ```
 
 ## 校验后安装
@@ -44,23 +44,23 @@ python -m pip install "bmlsub[transcription] @ https://github.com/microseventh/b
 需要先核对文件时，下载 wheel、源码包和 Release 的 `SHA256SUMS`，再验证摘要：
 
 ```bash
-curl -LO "https://github.com/microseventh/bmlsub/releases/download/v1.3.5/bmlsub-1.3.5-py3-none-any.whl"
-curl -LO "https://github.com/microseventh/bmlsub/releases/download/v1.3.5/bmlsub-1.3.5.tar.gz"
-curl -LO "https://github.com/microseventh/bmlsub/releases/download/v1.3.5/SHA256SUMS"
+curl -LO "https://github.com/microseventh/bmlsub/releases/download/v1.3.5.1/bmlsub-1.3.5.1-py3-none-any.whl"
+curl -LO "https://github.com/microseventh/bmlsub/releases/download/v1.3.5.1/bmlsub-1.3.5.1.tar.gz"
+curl -LO "https://github.com/microseventh/bmlsub/releases/download/v1.3.5.1/SHA256SUMS"
 shasum -a 256 -c SHA256SUMS
-python -m pip install ./bmlsub-1.3.5-py3-none-any.whl
+python -m pip install ./bmlsub-1.3.5.1-py3-none-any.whl
 ```
 
 使用同一份已校验 wheel 并安装 MLX Whisper 可选依赖：
 
 ```bash
-python -m pip install "./bmlsub-1.3.5-py3-none-any.whl[transcription]"
+python -m pip install "./bmlsub-1.3.5.1-py3-none-any.whl[transcription]"
 ```
 
 源码包也作为 Release 资产提供：
 
 ```text
-bmlsub-1.3.5.tar.gz
+bmlsub-1.3.5.1.tar.gz
 SHA-256：以同一 Release 附带的 SHA256SUMS 为准
 ```
 
@@ -72,13 +72,13 @@ SHA-256：以同一 Release 附带的 SHA256SUMS 为准
 升级到该 Release：
 
 ```bash
-python -m pip install --upgrade "https://github.com/microseventh/bmlsub/releases/download/v1.3.5/bmlsub-1.3.5-py3-none-any.whl"
+python -m pip install --upgrade "https://github.com/microseventh/bmlsub/releases/download/v1.3.5.1/bmlsub-1.3.5.1-py3-none-any.whl"
 ```
 
 需要覆盖当前安装时：
 
 ```bash
-python -m pip install --force-reinstall "https://github.com/microseventh/bmlsub/releases/download/v1.3.5/bmlsub-1.3.5-py3-none-any.whl"
+python -m pip install --force-reinstall "https://github.com/microseventh/bmlsub/releases/download/v1.3.5.1/bmlsub-1.3.5.1-py3-none-any.whl"
 ```
 
 安装完成后运行 `bmlsub --help` 和 `bmlsub --version` 确认命令入口与版本。

@@ -1,7 +1,7 @@
-# bmlsub 1.3.5
+# bmlsub 1.3.5.1
 
 [GitHub](https://github.com/microseventh/bmlsub) |
-[Stable release: v1.3.5](https://github.com/microseventh/bmlsub/releases/tag/v1.3.5) |
+[Stable release: v1.3.5.1](https://github.com/microseventh/bmlsub/releases/tag/v1.3.5.1) |
 [简体中文](docs/zh/README.md)
 
 `bmlsub` is a local workstation tool for subtitle, transcription, video
@@ -56,7 +56,7 @@ python -m pip install "git+https://github.com/microseventh/bmlsub.git"
 bmlsub --version
 ```
 
-The expected version output is `bmlsub 1.3.5`.
+The expected version output is `bmlsub 1.3.5.1`.
 
 To install the optional MLX Whisper integration from GitHub on Apple Silicon:
 
