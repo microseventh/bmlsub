@@ -85,18 +85,35 @@ def _questions(operation: str, *, rebuild: bool, cwd: Path, input_fn: InputFn,
         )
     elif operation == "trans":
         options["audio_language"] = _default("Audio language", "jpn", input_fn=input_fn, output=output)
-        options["strategy"] = _default("Transcription strategy (none/quick/full/custom)", "none",
+        print("Full: Whisper medium direct + Whisper turbo chunked + Qwen3-ASR direct.", file=output)
+        print("Qwen3-ASR receives complete audio from bmlsub and may split it internally.", file=output)
+        options["strategy"] = _default("Transcription strategy (none/quick/full/qwen3/custom)", "full",
                                        input_fn=input_fn, output=output)
-        if options["strategy"] not in {"none", "quick", "full", "custom"}:
-            raise ValueError("transcription strategy must be none, quick, full, or custom")
+        if options["strategy"] not in {"none", "quick", "full", "qwen3", "custom"}:
+            raise ValueError("transcription strategy must be none, quick, full, qwen3, or custom")
         options["transcription_language"] = _default(
             "Transcription language", "ja", input_fn=input_fn, output=output,
         )
         if options["strategy"] == "custom":
-            options["transcription_mode"] = _default(
-                "Whisper mode (direct/chunked)", "direct", input_fn=input_fn, output=output,
+            from ..transcription import DEFAULT_QWEN3_MODEL
+
+            options["engine"] = _default(
+                "Transcription engine (whisper/qwen3)", "whisper", input_fn=input_fn, output=output,
             )
-            options["model"] = _prompt("MLX Whisper model: ", input_fn=input_fn, output=output)
+            if options["engine"] not in {"whisper", "qwen3"}:
+                raise ValueError("transcription engine must be whisper or qwen3")
+            options["transcription_mode"] = _default(
+                "bmlsub audio input mode (direct/chunked)", "direct", input_fn=input_fn, output=output,
+            )
+            if options["transcription_mode"] not in {"direct", "chunked"}:
+                raise ValueError("transcription mode must be direct or chunked")
+            if options["engine"] == "qwen3" and options["transcription_mode"] != "direct":
+                raise ValueError("Qwen3-ASR requires direct mode; its library handles internal chunking")
+            default_model = (DEFAULT_QWEN3_MODEL if options["engine"] == "qwen3"
+                             else "mlx-community/whisper-large-v3-turbo")
+            options["model"] = _default(
+                "MLX model ID or local path", default_model, input_fn=input_fn, output=output,
+            )
             if options["transcription_mode"] == "chunked":
                 options["chunk_seconds"] = float(_default(
                     "Chunk seconds", "240", input_fn=input_fn, output=output,

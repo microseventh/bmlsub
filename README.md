@@ -1,8 +1,11 @@
-# bmlsub 1.3.5.1
+# bmlsub 1.3.6
 
 [GitHub](https://github.com/microseventh/bmlsub) |
-[Stable release: v1.3.5.1](https://github.com/microseventh/bmlsub/releases/tag/v1.3.5.1) |
+[Stable release: v1.3.6](https://github.com/microseventh/bmlsub/releases/tag/v1.3.6) |
 [简体中文](docs/zh/README.md)
+
+The source and stable release version is `1.3.6`.
+See the [1.3.6 release notes](docs/releases/v1.3.6.md) for the changes in this release.
 
 `bmlsub` is a local workstation tool for subtitle, transcription, video
 production, and release workflows. Each step is recorded as verifiable state
@@ -56,9 +59,9 @@ python -m pip install "git+https://github.com/microseventh/bmlsub.git"
 bmlsub --version
 ```
 
-The expected version output is `bmlsub 1.3.5.1`.
+The expected version output is `bmlsub 1.3.6`.
 
-To install the optional MLX Whisper integration from GitHub on Apple Silicon:
+To install the optional MLX Whisper and Qwen3-ASR integrations from GitHub on Apple Silicon:
 
 ```bash
 python -m pip install "bmlsub[transcription] @ git+https://github.com/microseventh/bmlsub.git"
@@ -81,7 +84,23 @@ Project/
 Run `bmlsub ws start` from the series root. On the first run, the questions
 can create `series.json`. After an episode directory exists, the command
 registers the source video, extracts reference subtitles and audio, and runs
-direct or chunked Whisper according to the selected policy.
+ASR according to the selected policy. The default `full` policy runs these
+jobs sequentially:
+
+1. `mlx-community/whisper-medium-mlx`, direct full-length input.
+2. `mlx-community/whisper-large-v3-turbo`, 240-second chunks with 5-second overlap.
+3. `mlx-community/Qwen3-ASR-1.7B-8bit`, direct full-length input.
+
+Choose `quick` for Whisper medium only, `qwen3` for Qwen3-ASR only, or `none`
+to extract audio without transcription. The `build trans` questions also
+offer Qwen3-ASR and let a custom recipe select the `whisper` or `qwen3` engine.
+
+Qwen's default `direct` mode passes the complete audio file to `mlx-qwen3-asr`
+without bmlsub creating external audio slices. The upstream library still
+processes long audio in internal chunks; its timestamps describe those audio
+chunk boundaries, not aligned sentence or word boundaries. Transcripts remain
+machine-generated references for proofreading. The Qwen engine accepts only
+`direct` mode and rejects external chunking or manual audio cuts.
 
 After translation, proofreading, and font collection, place the formal ASS
 subtitle and fonts in the episode directory, then run `bmlsub ws end`. The

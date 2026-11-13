@@ -281,35 +281,52 @@ def _mapping_for(operation: str, path: Path, options: Mapping[str, Any],
                 {"path": str(output_dir / f"{path.stem}.transcribe.wav"),
                  "stream_index": selected.index, "kind": "transcribe"},
             ))
-            strategy = str(options.get("strategy") or "none")
+            strategy = str(options.get("strategy") or "full")
+            if strategy not in {"none", "quick", "full", "qwen3", "custom"}:
+                blockers.append({"code": "transcription_strategy_invalid", "input": str(path)})
             if strategy in {"quick", "full"}:
                 outputs.append({
                     "path": str(output_dir / f"{path.stem}.whisper-medium.direct.json"),
-                    "kind": "transcript", "mode": "direct",
+                    "kind": "transcript", "mode": "direct", "engine": "whisper",
                     "model": "mlx-community/whisper-medium-mlx",
                     "language": str(options.get("transcription_language") or "ja"),
                 })
             if strategy == "full":
                 outputs.append({
                     "path": str(output_dir / f"{path.stem}.whisper-large-v3-turbo.chunked.json"),
-                    "kind": "transcript", "mode": "chunked",
+                    "kind": "transcript", "mode": "chunked", "engine": "whisper",
                     "model": "mlx-community/whisper-large-v3-turbo",
                     "language": str(options.get("transcription_language") or "ja"),
                     "chunk_seconds": float(options.get("chunk_seconds") or 240.0),
                     "overlap_seconds": float(options.get("overlap_seconds") or 5.0),
                 })
+            if strategy in {"full", "qwen3"}:
+                from ..transcription import DEFAULT_QWEN3_MODEL
+                outputs.append({
+                    "path": str(output_dir / f"{path.stem}.{DEFAULT_QWEN3_MODEL.split('/')[-1]}.direct.json"),
+                    "kind": "transcript", "mode": "direct", "engine": "qwen3",
+                    "model": DEFAULT_QWEN3_MODEL,
+                    "language": str(options.get("transcription_language") or "ja"),
+                    "timestamp_granularity": "audio_chunk",
+                })
             if strategy == "custom":
                 mode = str(options.get("transcription_mode") or "direct")
-                if mode not in {"direct", "chunked"}:
+                engine = str(options.get("engine") or "whisper")
+                if engine not in {"whisper", "qwen3"}:
+                    blockers.append({"code": "transcription_engine_invalid", "input": str(path)})
+                elif mode not in {"direct", "chunked"}:
                     blockers.append({"code": "transcription_mode_invalid", "input": str(path)})
+                elif engine == "qwen3" and mode != "direct":
+                    blockers.append({"code": "qwen3_requires_direct", "input": str(path)})
                 elif not str(options.get("model") or "").strip():
                     blockers.append({"code": "transcription_model_missing", "input": str(path)})
                 else:
                     model = str(options["model"])
                     outputs.append({
                         "path": str(output_dir / f"{path.stem}.{model.split('/')[-1]}.{mode}.json"),
-                        "kind": "transcript", "mode": mode, "model": model,
+                        "kind": "transcript", "mode": mode, "engine": engine, "model": model,
                         "language": str(options.get("transcription_language") or "ja"),
+                        "timestamp_granularity": "audio_chunk" if engine == "qwen3" else "segment",
                         "chunk_seconds": float(options.get("chunk_seconds") or 240.0),
                         "overlap_seconds": float(options.get("overlap_seconds") or 5.0),
                     })
@@ -355,6 +372,8 @@ def plan_operation(operation: str, directory: Path | str = ".", *, rebuild: bool
         return refusal
     root = Path(directory).expanduser().resolve()
     choices = dict(options or {})
+    if operation == "trans":
+        choices["strategy"] = str(choices.get("strategy") or "full")
     discovery = discover_inputs(operation, root, recursive=recursive)
     recorded_outputs = BuildContext(root).recorded_outputs()
     registered_paths = set(recorded_outputs)
@@ -565,16 +584,21 @@ def _whisper_segments(payload: Mapping[str, Any], *, offset: float = 0.0) -> lis
 
 
 def _write_transcript(target: Path, output: Mapping[str, Any], segments: list[dict[str, Any]],
-                      context: BuildContext, rebuild: bool) -> tuple[dict[str, Any], Path | None]:
+                      context: BuildContext, rebuild: bool, *,
+                      asr_metadata: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], Path | None]:
     backup = _prepare_target(target, context, rebuild)
     temporary = _temporary_target(target)
     payload = {
         "schema_version": "transcript-v1", "mode": output["mode"],
         "model": output["model"], "language": output["language"],
+        "engine": output.get("engine") or "whisper",
+        "timestamp_granularity": output.get("timestamp_granularity") or "segment",
         "segments": segments, "text": " ".join(
             str(item["text"]).strip() for item in segments if str(item["text"]).strip()
         ),
     }
+    if asr_metadata is not None:
+        payload["asr_metadata"] = dict(asr_metadata)
     try:
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         from ..transcription import TranscriptionMode, validate_transcript_output
@@ -593,8 +617,8 @@ def _write_transcript(target: Path, output: Mapping[str, Any], segments: list[di
 
 def _execute_whisper(wav_path: Path, outputs: list[Mapping[str, Any]], runner: ProcessRunner,
                      context: BuildContext, rebuild: bool) -> list[dict[str, Any]]:
-    from ..transcription import MlxWhisperBackend
-    backend = MlxWhisperBackend()
+    """Execute planned ASR jobs serially, including legacy Whisper-only plans."""
+    from ..transcription import create_backend
     completed: list[dict[str, Any]] = []
     with wave.open(str(wav_path), "rb") as stream:
         duration = stream.getnframes() / stream.getframerate()
@@ -603,11 +627,22 @@ def _execute_whisper(wav_path: Path, outputs: list[Mapping[str, Any]], runner: P
         if output.get("action") == "skip":
             completed.append({**dict(output), **_identity(target, include_hash=True)})
             continue
+        engine = str(output.get("engine") or "whisper")
+        if engine == "qwen3" and output["mode"] != "direct":
+            raise ValueError("Qwen3 requires direct mode; its backend manages audio chunks")
+        backend = create_backend(engine)
+        timestamp_granularity = str(
+            output.get("timestamp_granularity") or ("audio_chunk" if engine == "qwen3" else "segment")
+        )
+        asr_metadata = None
         if output["mode"] == "direct":
             raw = backend.transcribe(
                 wav_path, model=str(output["model"]), language=str(output["language"]), decoding={},
             )
             segments = _whisper_segments(raw)
+            timestamp_granularity = str(raw.get("timestamp_granularity") or timestamp_granularity)
+            if isinstance(raw.get("asr_metadata"), Mapping):
+                asr_metadata = raw["asr_metadata"]
         else:
             chunk_seconds = float(output.get("chunk_seconds") or 240.0)
             overlap = float(output.get("overlap_seconds") or 5.0)
@@ -637,7 +672,19 @@ def _execute_whisper(wav_path: Path, outputs: list[Mapping[str, Any]], runner: P
                 )
                 segments.extend(_whisper_segments(raw, offset=start))
             segments.sort(key=lambda item: (item["start"], item["end"]))
-        written, _ = _write_transcript(target, output, segments, context, rebuild)
+        written, _ = _write_transcript(
+            target, {**dict(output), "engine": engine,
+                     "timestamp_granularity": timestamp_granularity},
+            segments, context, rebuild, asr_metadata=asr_metadata,
+        )
+        review_chunks = (asr_metadata or {}).get("review_required_chunk_indices")
+        if engine == "qwen3" and review_chunks:
+            written.setdefault("diagnostics", []).append({
+                "code": "qwen3_repetition_stop",
+                "message": "Qwen3 stopped repeated generation; review the affected audio chunks",
+                "level": "warning",
+                "context": {"chunk_indices": list(review_chunks)},
+            })
         completed.append(written)
     return completed
 

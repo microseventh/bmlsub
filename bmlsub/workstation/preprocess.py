@@ -16,6 +16,7 @@ from ..transcription import run_transcript_text_export
 from .common import discover_source_video, ensure_directories, open_workstation
 from .models import (
     PreprocessConfig, ReferenceTrackSelection, TrackSelection, WorkstationConfig,
+    transcription_jobs_for_mode,
 )
 from .series import discover_series_context
 from .state import (
@@ -298,7 +299,8 @@ def run_preprocess(episode_dir: Path | str, *, episode_id: str | None = None,
     for job in whisper_jobs:
         with progress_task(
             phase="preprocess", step=f"preprocess.transcribe.{job.name}",
-            label=ui_text("MLX Whisper 转录", "MLX Whisper transcription"),
+            label=(ui_text("Qwen3-ASR 整段转录", "Qwen3-ASR full-length transcription")
+                   if job.engine == "qwen3" else ui_text("MLX Whisper 转录", "MLX Whisper transcription")),
             detail=f"{job.name} ({job.mode})",
         ) as task:
             def update_progress(event: dict[str, Any]) -> None:
@@ -311,6 +313,7 @@ def run_preprocess(episode_dir: Path | str, *, episode_id: str | None = None,
             result = workstation.pipeline.transcribe(
                 workspace=root, episode_id=identifier, audio_artifact_id=transcribe_id,
                 mode=job.mode, model=job.model, model_revision=job.model_revision,
+                engine=job.engine,
                 language=job.language, chunk_seconds=job.chunk_seconds,
                 overlap_seconds=job.overlap_seconds, manual_cuts=job.manual_cuts,
                 throttle_seconds=job.throttle_seconds, decoding=dict(job.decoding),
@@ -410,12 +413,13 @@ def _normalize_reference_indices(stream_index, stream_indices) -> tuple[int, ...
 
 def _transcription_policy(whisper_jobs) -> str:
     jobs = tuple(whisper_jobs)
-    signature = [(item.name, item.mode) for item in jobs]
     if not jobs:
         return "none"
-    if signature == [("direct", "direct")]:
-        return "quick"
-    if signature == [("direct", "direct"), ("chunked", "chunked")]:
+    for policy in ("quick", "full", "qwen3"):
+        if jobs == transcription_jobs_for_mode(policy):
+            return policy
+    # Recognize the pre-Qwen default so existing full workflows gain job three.
+    if jobs == transcription_jobs_for_mode("full")[:2]:
         return "full"
     return "custom"
 

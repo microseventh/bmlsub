@@ -30,6 +30,12 @@ bmlsub rebuild [option]
 `end` 保留交互与执行确认，`end yes` 默认中文、完整制作并自动确认；
 缺实际输入／配置或无法确定单集时，返回具体诊断，不退回 `start`。
 
+`ws start` 的转录问答默认选择 `full`，依次运行 Whisper medium 整段、Whisper
+large-v3-turbo 切片和 Qwen3-ASR 整段。也可以选择仅 Whisper medium（`quick`）、
+仅 Qwen（`qwen3`）或不转录（`none`）。`build trans` 的问答提供同样的默认顺序，
+并支持自定义 Whisper/Qwen 引擎。Qwen 只支持整段输入，bmlsub 不额外切片；
+其模型库内部仍会处理长音频分块。详细语义见 [ASR 策略](workstation.md#asr-策略)。
+
 ## 字幕繁化
 
 ```bash
@@ -121,7 +127,7 @@ bmlsub rebuild --help
 | --- | --- | --- | --- | --- | --- |
 | `bgminfo` | Bangumi Information | 番组信息 | 创建或验证番组元数据 | 否 | 是 |
 | `ensub` | English Subtitle Extraction | 英文参考字幕提取 | 从视频提取文本参考字幕 | 否 | 是 |
-| `trans` | Transcription | 音频提取与转录 | 提取音频并运行 Whisper | 否 | 是 |
+| `trans` | Transcription | 音频提取与转录 | 提取音频并运行 Whisper 或 Qwen3-ASR | 否 | 是 |
 | `pubinfo` | Publication Information | 发布信息配置 | 保存非敏感发布参数与凭据引用 | 否 | 是 |
 | `encode` | Encode | 视频编码与封装 | 转码、字幕内嵌或字幕/字体内封 | 否 | 是 |
 | `torrent` | Torrent Creation | Torrent 创建 | 为现有内容生成 Torrent | 否 | 是 |

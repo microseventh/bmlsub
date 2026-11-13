@@ -169,12 +169,16 @@ def _legacy_build_parser() -> argparse.ArgumentParser:
     reconstruct_ass.add_argument("--force", action="store_true")
     reconstruct_ass.set_defaults(handler=_reconstruct_ass)
 
-    transcribe = commands.add_parser("transcribe", help="Transcribe registered Whisper-ready audio")
+    transcribe = commands.add_parser("transcribe", help="Transcribe registered audio with MLX Whisper or Qwen3-ASR")
     transcribe.add_argument("--workspace", default=".")
     transcribe.add_argument("--episode-id", required=True)
     transcribe.add_argument("--audio-artifact-id", required=True)
+    transcribe.add_argument(
+        "--engine", choices=("whisper", "qwen3"), default="whisper",
+        help="ASR backend (Qwen3-ASR requires direct mode and may split audio internally)",
+    )
     transcribe.add_argument("--mode", choices=("direct", "chunked", "both"), default="direct")
-    transcribe.add_argument("--model", default="mlx-community/whisper-large-v3-turbo")
+    transcribe.add_argument("--model", help="Model ID or local path (default: engine-specific model)")
     transcribe.add_argument("--model-revision", default="main")
     transcribe.add_argument("--language", default="ja")
     transcribe.add_argument("--chunk-seconds", type=float, default=240.0)
@@ -446,7 +450,7 @@ def _legacy_build_parser() -> argparse.ArgumentParser:
     workstation_start.add_argument(
         "--delivery-torrents", choices=("selected", "none"), default="selected",
     )
-    workstation_start.add_argument("--transcription", choices=("quick", "full", "none"))
+    workstation_start.add_argument("--transcription", choices=("quick", "full", "qwen3", "none"))
     workstation_start.add_argument("--notes-file", type=Path)
     workstation_start.add_argument("--force", action="store_true")
     workstation_start.set_defaults(handler=_workstation_start, workstation_start_command=None)
@@ -488,7 +492,7 @@ def _legacy_build_parser() -> argparse.ArgumentParser:
             "create_torrents",
         ),
     )
-    workstation_rebuild.add_argument("--transcription", choices=("quick", "full", "none"))
+    workstation_rebuild.add_argument("--transcription", choices=("quick", "full", "qwen3", "none"))
     workstation_rebuild.add_argument("--source-video", type=Path)
     workstation_rebuild.add_argument(
         "--reference-policy", choices=("all-matching", "explicit", "unique"),
@@ -551,7 +555,7 @@ def _legacy_build_parser() -> argparse.ArgumentParser:
     workstation_preprocess.add_argument("--audio-language", default="jpn")
     workstation_preprocess.add_argument("--audio-stream-index", type=int)
     workstation_preprocess.add_argument(
-        "--transcription", choices=("quick", "full", "none"), default="full",
+        "--transcription", choices=("quick", "full", "qwen3", "none"), default="full",
     )
     workstation_preprocess.set_defaults(handler=_workstation_preprocess)
 
@@ -878,9 +882,11 @@ def _transcribe(args: argparse.Namespace) -> dict[str, Any]:
     decoding = json.loads(args.decoding_json)
     if not isinstance(decoding, dict):
         raise ValueError("--decoding-json must contain a JSON object")
+    engine = getattr(args, "engine", "whisper")
+    engine_label = "Qwen3-ASR" if engine == "qwen3" else "Whisper"
     with progress_task(
-        phase="preprocess", step="transcription.whisper",
-        label=ui_text("MLX Whisper 转录", "MLX Whisper transcription"),
+        phase="preprocess", step=f"transcription.{engine}",
+        label=ui_text(f"MLX {engine_label} 转录", f"MLX {engine_label} transcription"),
         detail=args.mode,
     ) as task:
         def update(event: dict[str, Any]) -> None:
@@ -892,7 +898,7 @@ def _transcribe(args: argparse.Namespace) -> dict[str, Any]:
         payload = Pipeline(state_dir=args.state_dir).transcribe(
             workspace=args.workspace, episode_id=args.episode_id,
             audio_artifact_id=args.audio_artifact_id, mode=args.mode,
-            model=args.model, model_revision=args.model_revision,
+            engine=engine, model=args.model, model_revision=args.model_revision,
             language=args.language, chunk_seconds=args.chunk_seconds,
             overlap_seconds=args.overlap_seconds,
             manual_cuts=tuple(parse_timestamp(item) for item in args.manual_cut),
@@ -1211,11 +1217,24 @@ def _prompt_series_initialization_mode() -> str:
 
 def _prompt_transcription_mode(default: str = "full") -> str:
     print(ui_text("是否执行转录：", "Transcription mode:"), file=sys.stderr)
-    print(ui_text("  1. 单次整段转录（较快）", "  1. One direct full-length transcription (faster)"), file=sys.stderr)
-    print(ui_text("  2. 完整转录 + 切片转录（默认）", "  2. Full plus chunked transcription (default)"), file=sys.stderr)
+    print(ui_text(
+        "  1. Whisper medium 整段转录（较快）",
+        "  1. Whisper medium direct transcription (faster)",
+    ), file=sys.stderr)
+    print(ui_text(
+        "  2. 三模型：Whisper medium 整段 + turbo 切片 + Qwen3-ASR 整段",
+        "  2. Three models: Whisper medium direct + turbo chunked + Qwen3-ASR direct",
+    ), file=sys.stderr)
     print(ui_text("  3. 不转录", "  3. Do not transcribe"), file=sys.stderr)
-    value = _prompt_default(ui_text("请选择 1、2 或 3", "Select 1, 2, or 3"), "2")
-    return {"1": "quick", "2": "full", "3": "none"}.get(value, value)
+    print(ui_text("  4. 仅 Qwen3-ASR 整段转录", "  4. Qwen3-ASR direct transcription only"), file=sys.stderr)
+    print(ui_text(
+        "  Qwen3-ASR 由 bmlsub 整段传入，模型库仍可能自动分块。",
+        "  bmlsub passes the complete audio to Qwen3-ASR; its library may split it internally.",
+    ), file=sys.stderr)
+    choices = {"1": "quick", "2": "full", "3": "none", "4": "qwen3"}
+    default_choice = next((key for key, value in choices.items() if value == default), "2")
+    value = _prompt_default(ui_text("请选择 1、2、3 或 4", "Select 1, 2, 3, or 4"), default_choice)
+    return choices.get(value, value)
 
 
 def _prompt_delivery_selection():
@@ -1491,6 +1510,7 @@ def _workstation_start(args: argparse.Namespace) -> dict[str, Any]:
         execute = _confirm_stderr(f"是否执行 {inspection['recommended_action']}")
     transcription = args.transcription
     saved_preprocess = None
+    restored_jobs = None
     if inspection["recommended_action"] == "run_preprocess":
         incomplete = any(
             item.get("code") == "preprocess_incomplete"
@@ -1501,13 +1521,32 @@ def _workstation_start(args: argparse.Namespace) -> dict[str, Any]:
             saved_preprocess = _saved_preprocess_options(inspection["episode_dir"])
         if transcription is None and saved_preprocess:
             saved_policy = saved_preprocess.get("transcription_policy")
-            if saved_policy in {"quick", "full", "none"}:
+            if saved_policy in {"quick", "full", "qwen3", "none"}:
                 transcription = saved_policy
+            elif saved_policy == "custom":
+                from .workstation import TranscriptionJob
+
+                saved_jobs = saved_preprocess.get("whisper_jobs")
+                if not isinstance(saved_jobs, (list, tuple)) or not saved_jobs:
+                    raise ValueError("saved custom transcription policy requires non-empty whisper_jobs")
+                jobs = []
+                for index, item in enumerate(saved_jobs):
+                    if not isinstance(item, dict):
+                        raise ValueError(f"saved custom transcription job {index + 1} must be an object")
+                    try:
+                        jobs.append(TranscriptionJob(**item))
+                    except (TypeError, ValueError, AttributeError) as exc:
+                        raise ValueError(f"saved custom transcription job {index + 1} is invalid: {exc}") from exc
+                if len({job.name for job in jobs}) != len(jobs):
+                    raise ValueError("saved custom transcription jobs must have unique names")
+                restored_jobs = tuple(jobs)
+                transcription = "custom"
         if transcription is None and sys.stdin.isatty():
             transcription = _prompt_transcription_mode()
         transcription = transcription or "full"
     from .workstation import transcription_jobs_for_mode
-    whisper_jobs = transcription_jobs_for_mode(transcription) if transcription else ()
+    whisper_jobs = (restored_jobs if restored_jobs is not None else
+                    transcription_jobs_for_mode(transcription) if transcription else ())
     reference_indices = tuple(args.reference_stream_index)
     reference_policy = args.reference_policy
     audio_stream_index = args.audio_stream_index

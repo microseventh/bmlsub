@@ -380,12 +380,15 @@ class WorkstationStartTests(unittest.TestCase):
         full = transcription_jobs_for_mode("full")
         self.assertEqual(
             [(item.name, item.mode) for item in full],
-            [("direct", "direct"), ("chunked", "chunked")],
+            [("direct", "direct"), ("chunked", "chunked"), ("qwen3", "direct")],
         )
         self.assertEqual(full[0].model, "mlx-community/whisper-medium-mlx")
         self.assertEqual(full[1].model, "mlx-community/whisper-large-v3-turbo")
         self.assertEqual(full[1].chunk_seconds, 240.0)
         self.assertEqual(full[1].overlap_seconds, 5.0)
+        self.assertEqual(full[2].engine, "qwen3")
+        self.assertEqual(full[2].model, "mlx-community/Qwen3-ASR-1.7B-8bit")
+        self.assertEqual(transcription_jobs_for_mode("qwen3"), (full[2],))
         self.assertEqual(transcription_jobs_for_mode("none"), ())
         with self.assertRaises(ValueError):
             transcription_jobs_for_mode("other")

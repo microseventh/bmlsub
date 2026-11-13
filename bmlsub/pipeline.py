@@ -404,7 +404,7 @@ class Pipeline:
 
     def transcribe(self, *, workspace: Path | str, episode_id: str,
                    audio_artifact_id: str, mode: str = "direct",
-                   model: str = "mlx-community/whisper-large-v3-turbo",
+                   model: str | None = None, engine: str = "whisper",
                    model_revision: str = "main", language: str = "ja",
                    chunk_seconds: float = 240.0, overlap_seconds: float = 5.0,
                    manual_cuts: tuple[float, ...] | list[float] = (),
@@ -419,7 +419,7 @@ class Pipeline:
             workspace=workspace, episode_id=episode_id,
             audio_artifact_id=audio_artifact_id,
             options=TranscriptionOptions(
-                mode=TranscriptionMode(mode), model=model,
+                mode=TranscriptionMode(mode), model=model, engine=engine,
                 model_revision=model_revision, language=language,
                 chunk_seconds=chunk_seconds, overlap_seconds=overlap_seconds,
                 manual_cuts=tuple(manual_cuts), throttle_seconds=throttle_seconds,

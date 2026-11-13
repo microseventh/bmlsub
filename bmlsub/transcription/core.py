@@ -1,4 +1,4 @@
-"""Reliable MLX Whisper transcription of registered audio artifacts."""
+"""Reliable MLX ASR transcription of registered audio artifacts."""
 
 from __future__ import annotations
 
@@ -17,9 +17,10 @@ from ..artifacts import ArtifactBatchWriter, ArtifactWriteSpec
 from ..execution import BmlsubError, ErrorCode, ProcessRunner
 from ..execution.stage_runner import StageContext, StageOutcome, StageRunner
 from ..state.fingerprints import fingerprint_parameters, fingerprint_tools, hash_json
-from ..state.models import Diagnostic, StageInputBinding, StageResult
+from ..state.models import Diagnostic, DiagnosticLevel, StageInputBinding, StageResult
 from ..state.sqlite_store import SQLiteJobStore
 from ..media.video import get_current_artifact
+from .qwen import DEFAULT_QWEN3_MODEL, MlxQwen3AsrBackend
 
 
 TRANSCRIPTION_STAGE = "transcription.whisper"
@@ -30,6 +31,8 @@ TRANSCRIPTION_VALIDATOR_VERSION = "transcript-validator-v2"
 CHUNK_PLAN_VERSION = "ffmpeg-chunk-plan-v1"
 TRANSCRIPTION_PROGRESS_SCHEMA_VERSION = "transcription-progress-v1"
 ProgressCallback = Callable[[dict[str, Any]], None]
+DEFAULT_WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
+TRANSCRIPTION_ENGINES = ("whisper", "qwen3")
 
 
 class TranscriptionMode(str, Enum):
@@ -77,10 +80,19 @@ class MlxWhisperBackend:
             ) from exc
 
 
+def create_backend(engine: str = "whisper") -> WhisperBackend:
+    """Select an optional ASR dependency without importing it eagerly."""
+    if engine == "whisper":
+        return MlxWhisperBackend()
+    if engine == "qwen3":
+        return MlxQwen3AsrBackend()
+    raise ValueError("transcription engine must be whisper or qwen3")
+
+
 @dataclass(frozen=True)
 class TranscriptionOptions:
     mode: TranscriptionMode = TranscriptionMode.DIRECT
-    model: str = "mlx-community/whisper-large-v3-turbo"
+    model: str | None = None
     model_revision: str = "main"
     language: str = "ja"
     chunk_seconds: float = 240.0
@@ -88,8 +100,18 @@ class TranscriptionOptions:
     manual_cuts: tuple[float, ...] = ()
     throttle_seconds: float = 0.0
     decoding: Mapping[str, Any] = field(default_factory=dict)
+    engine: str = "whisper"
 
     def __post_init__(self) -> None:
+        engine = self.engine.strip().lower()
+        if engine not in TRANSCRIPTION_ENGINES:
+            raise ValueError("transcription engine must be whisper or qwen3")
+        object.__setattr__(self, "engine", engine)
+        object.__setattr__(self, "mode", TranscriptionMode(self.mode))
+        if self.model is None:
+            object.__setattr__(self, "model", DEFAULT_QWEN3_MODEL if engine == "qwen3" else DEFAULT_WHISPER_MODEL)
+        if engine == "qwen3" and (self.mode is not TranscriptionMode.DIRECT or self.manual_cuts):
+            raise ValueError("Qwen3 requires direct mode without manual cuts; pass the complete audio")
         if not self.model.strip() or not self.model_revision.strip() or not self.language.strip():
             raise ValueError("model, model revision, and language must not be empty")
         if self.chunk_seconds <= 0:
@@ -144,8 +166,15 @@ def run_transcription(*, workspace: Path | str, episode_id: str,
             details={"artifact_id": audio_artifact_id},
         )
     config = options or TranscriptionOptions()
-    whisper = backend or MlxWhisperBackend()
-    if isinstance(whisper, MlxWhisperBackend):
+    whisper = backend or create_backend(config.engine)
+    if isinstance(whisper, (MlxWhisperBackend, MlxQwen3AsrBackend)):
+        if whisper.version() == "unavailable":
+            dependency = "mlx-qwen3-asr" if config.engine == "qwen3" else "mlx-whisper"
+            raise BmlsubError(
+                f"{dependency} is required; install bmlsub[transcription] in the active environment",
+                code=ErrorCode.INPUT_MISSING,
+                details={"dependency": dependency, "engine": config.engine},
+            )
         resolved_model, model_integrity = _resolve_model(config.model, config.model_revision)
     else:
         resolved_model = config.model
@@ -160,7 +189,7 @@ def run_transcription(*, workspace: Path | str, episode_id: str,
     targets = tuple(_output_path(
         directory, episode_id, mode, config.model,
         model_revision=config.model_revision, language=config.language,
-        decoding=config.decoding,
+        decoding=config.decoding, engine=config.engine,
     ) for mode in modes)
     chunk_plan = (_chunk_plan(duration_seconds, config)
                   if TranscriptionMode.CHUNKED in modes else ())
@@ -178,7 +207,7 @@ def run_transcription(*, workspace: Path | str, episode_id: str,
         "size": audio.size,
         "mtime_ns": audio.mtime_ns,
     })
-    parameter_fp = fingerprint_parameters({
+    parameters = {
         "mode": config.mode.value,
         "model": config.model,
         "model_revision": config.model_revision,
@@ -195,10 +224,15 @@ def run_transcription(*, workspace: Path | str, episode_id: str,
         "profile_version": TRANSCRIPTION_PROFILE_VERSION,
         "naming_version": TRANSCRIPTION_NAMING_VERSION,
         "chunk_plan_version": CHUNK_PLAN_VERSION,
-    })
+    }
+    # Keep historical Whisper cache identities stable; Qwen has its own stage,
+    # naming identity, tool fingerprint, and explicit engine parameter.
+    if config.engine != "whisper":
+        parameters["engine"] = config.engine
+    parameter_fp = fingerprint_parameters(parameters)
     tool_fp = fingerprint_tools({
         "bmlsub": __version__,
-        "mlx_whisper": whisper.version(),
+        ("mlx_qwen3_asr" if config.engine == "qwen3" else "mlx_whisper"): whisper.version(),
         "ffmpeg": ffmpeg_version,
         "validator": TRANSCRIPTION_VALIDATOR_VERSION,
     })
@@ -219,6 +253,7 @@ def run_transcription(*, workspace: Path | str, episode_id: str,
                 metadata={
                     "source_audio_artifact_id": audio.artifact_id,
                     "mode": mode.value,
+                    "engine": config.engine,
                     "model": config.model,
                     "model_revision": config.model_revision,
                     "language": config.language,
@@ -275,6 +310,14 @@ def run_transcription(*, workspace: Path | str, episode_id: str,
             metadata["validation"] = validation[mode.value]
             from dataclasses import replace
             artifacts.append(replace(result.artifact, metadata=metadata))
+            review_indices = validation[mode.value].get("review_required_chunk_indices", [])
+            if review_indices:
+                diagnostics.append(Diagnostic(
+                    code="qwen3_repetition_stop",
+                    message="Qwen3 stopped repeated generation; review the affected audio chunks",
+                    level=DiagnosticLevel.WARNING,
+                    context={"chunk_indices": review_indices},
+                ))
             if result.backup_path:
                 diagnostics.append(Diagnostic(
                     code="artifact_backup_created",
@@ -297,7 +340,7 @@ def run_transcription(*, workspace: Path | str, episode_id: str,
         return StageOutcome(artifacts=tuple(artifacts), diagnostics=tuple(diagnostics))
 
     return StageRunner(ledger).run(
-        workspace=root, command_name="transcribe", stage_name=TRANSCRIPTION_STAGE,
+        workspace=root, command_name="transcribe", stage_name=f"transcription.{config.engine}",
         episode_id=episode_id, input_fingerprint=input_fp,
         parameter_fingerprint=parameter_fp, tool_fingerprint=tool_fp,
         adapter=adapter,
@@ -334,7 +377,11 @@ def validate_transcript_output(path: Path, *, expected_mode: TranscriptionMode,
     text = payload.get("text")
     if not isinstance(text, str):
         raise ValueError("transcript text must be a string")
-    return {"segment_count": len(segments), "text_characters": len(text)}
+    validation = {"segment_count": len(segments), "text_characters": len(text)}
+    asr_metadata = payload.get("asr_metadata")
+    if payload.get("engine") == "qwen3" and isinstance(asr_metadata, dict):
+        validation["review_required_chunk_indices"] = asr_metadata.get("review_required_chunk_indices", [])
+    return validation
 
 
 def _transcribe_direct(audio_path: Path, backend: WhisperBackend,
@@ -353,7 +400,11 @@ def _transcribe_direct(audio_path: Path, backend: WhisperBackend,
         progress_callback, mode=TranscriptionMode.DIRECT,
         status="completed",
     )
-    return _transcript_payload(options, TranscriptionMode.DIRECT, segments)
+    payload = _transcript_payload(options, TranscriptionMode.DIRECT, segments)
+    for key in ("timestamp_granularity", "asr_metadata"):
+        if key in result:
+            payload[key] = result[key]
+    return payload
 
 
 def _transcribe_chunked(audio_path: Path, backend: WhisperBackend,
@@ -444,18 +495,18 @@ def _normalize_segments(raw_segments: Any, *, offset: float,
                         clip_start: float | None = None,
                         clip_end: float | None = None) -> list[dict[str, Any]]:
     if not isinstance(raw_segments, (list, tuple)):
-        raise ValueError("Whisper result segments must be a list")
+        raise ValueError("ASR result segments must be a list")
     normalized = []
     for item in raw_segments:
         if not isinstance(item, Mapping):
-            raise ValueError("Whisper segment must be an object")
+            raise ValueError("ASR segment must be an object")
         try:
             raw_start = float(item["start"]) + offset
             raw_end = float(item["end"]) + offset
         except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("Whisper segment timestamps are invalid") from exc
+            raise ValueError("ASR segment timestamps are invalid") from exc
         if not (raw_start == raw_start and raw_end == raw_end):
-            raise ValueError("Whisper segment timestamps are invalid")
+            raise ValueError("ASR segment timestamps are invalid")
         start = max(0.0, raw_start)
         end = max(start, raw_end)
         if clip_start is not None:
@@ -479,6 +530,7 @@ def _transcript_payload(options: TranscriptionOptions, mode: TranscriptionMode,
     return {
         "schema_version": TRANSCRIPTION_SCHEMA_VERSION,
         "mode": mode.value,
+        "engine": options.engine,
         "model": options.model,
         "model_revision": options.model_revision,
         "language": options.language,
@@ -526,7 +578,7 @@ def _resolve_model(model: str, revision: str) -> tuple[str, dict[str, Any]]:
         snapshot = Path(snapshot_download(repo_id=model, revision=revision)).resolve()
     except Exception as exc:
         raise BmlsubError(
-            "Whisper model revision could not be resolved",
+            "ASR model revision could not be resolved",
             code=ErrorCode.EXTERNAL_SERVICE_ERROR,
             retryable=True,
             details={"model": model, "revision": revision,
@@ -563,13 +615,17 @@ def _output_directory(workspace: Path, episode_id: str,
 
 def _output_path(directory: Path, episode_id: str, mode: TranscriptionMode,
                  model: str, *, model_revision: str = "main",
-                 language: str = "ja", decoding: Mapping[str, Any] | None = None) -> Path:
+                 language: str = "ja", decoding: Mapping[str, Any] | None = None,
+                 engine: str = "whisper") -> Path:
     model_name = model.rstrip("/").split("/")[-1]
     safe_model = "".join(char if char.isalnum() or char in "._-" else "-" for char in model_name)
-    identity = fingerprint_parameters({
+    parameters = {
         "model": model, "model_revision": model_revision,
         "language": language, "decoding": dict(decoding or {}),
-    })[:8]
+    }
+    if engine != "whisper":
+        parameters["engine"] = engine
+    identity = fingerprint_parameters(parameters)[:8]
     return directory / (
         f"{episode_id}.{mode.value}.{safe_model}.{language}.{identity}.transcript.json"
     )

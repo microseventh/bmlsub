@@ -2,6 +2,41 @@
 
 All notable changes to `bmlsub` are recorded here.
 
+## 1.3.6 - 2026-11-13
+
+### Qwen3-ASR integration
+
+- Add the optional `mlx-qwen3-asr` backend and default
+  `mlx-community/Qwen3-ASR-1.7B-8bit` model on Apple Silicon.
+- Run the default `full` transcription policy sequentially: Whisper medium
+  direct, Whisper large-v3-turbo chunked, then Qwen3-ASR direct. Keep the
+  existing turbo settings of 240-second chunks with 5-second overlap.
+- Offer Qwen3-only transcription and custom engine selection in Workstation
+  and standalone transcription workflows.
+- Pass the complete WAV to Qwen in one backend call and reject bmlsub external
+  chunking or manual cuts for this engine. Clearly label the upstream
+  library's internal audio-chunk timestamps instead of implying sentence-
+  or word-level alignment.
+- Preserve native decode metadata, reject token-limit truncation, and emit
+  review warnings when the model stops repeated generation.
+- Isolate Qwen stage and output identities from Whisper, export readable
+  transcript text, and reuse valid completed Qwen artifacts.
+- Restore custom engine, model, revision, language, and decoding settings
+  without replacing them with default jobs. Keep legacy jobs without an
+  engine field compatible with Whisper.
+
+### Verification
+
+- Add regression coverage for backend selection, task order, CLI menus,
+  configuration recovery, artifact export, cache reuse, and error handling.
+- Verify a complete 23:58.048 Japanese recording through the Qwen Pipeline,
+  including text export and cache reuse, with no bmlsub external audio slices.
+- Verify the default three-model sequence with real inference on a short
+  audio fixture. The integration suite contains 199 tests: 198 passed and
+  one unrelated real-font fixture test was skipped.
+
+English release notes: [docs/releases/v1.3.6.md](docs/releases/v1.3.6.md).
+
 ## 1.3.5.1 - 2026-10-06
 
 ### Stable release metadata

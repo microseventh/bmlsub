@@ -1,5 +1,9 @@
 # Claude/operator-local automation
 .claude/
+.learnings/
+
+# Local integration records contain machine-specific paths and runtime logs
+docs/testing/
 
 # Python bytecode and build products
 __pycache__/

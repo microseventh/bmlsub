@@ -8,6 +8,7 @@ from typing import Any, Mapping, Sequence
 
 from .naming import ProductKind, ReleaseNames, intermediate_path, product_path, product_torrent_path
 from .series import SeriesContext
+from ..transcription import DEFAULT_QWEN3_MODEL, TranscriptionOptions
 
 
 @dataclass(frozen=True)
@@ -73,7 +74,7 @@ class ReferenceTrackSelection:
 class TranscriptionJob:
     name: str
     mode: str = "direct"
-    model: str = "mlx-community/whisper-large-v3-turbo"
+    model: str | None = None
     model_revision: str = "main"
     language: str = "ja"
     chunk_seconds: float = 240.0
@@ -81,6 +82,7 @@ class TranscriptionJob:
     manual_cuts: tuple[float, ...] = ()
     throttle_seconds: float = 0.0
     decoding: Mapping[str, Any] = field(default_factory=dict)
+    engine: str = "whisper"
 
     def __post_init__(self) -> None:
         name = self.name.strip()
@@ -92,6 +94,15 @@ class TranscriptionJob:
             raise ValueError("transcription chunk timing is invalid")
         if self.throttle_seconds < 0:
             raise ValueError("transcription throttle must be non-negative")
+        options = TranscriptionOptions(
+            mode=self.mode, model=self.model, engine=self.engine,
+            model_revision=self.model_revision, language=self.language,
+            chunk_seconds=self.chunk_seconds, overlap_seconds=self.overlap_seconds,
+            manual_cuts=self.manual_cuts, throttle_seconds=self.throttle_seconds,
+            decoding=self.decoding,
+        )
+        object.__setattr__(self, "engine", options.engine)
+        object.__setattr__(self, "model", options.model)
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "manual_cuts", tuple(self.manual_cuts))
         object.__setattr__(self, "decoding", dict(self.decoding))
@@ -99,6 +110,7 @@ class TranscriptionJob:
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name, "mode": self.mode, "model": self.model,
+            "engine": self.engine,
             "model_revision": self.model_revision, "language": self.language,
             "chunk_seconds": self.chunk_seconds, "overlap_seconds": self.overlap_seconds,
             "manual_cuts": list(self.manual_cuts), "throttle_seconds": self.throttle_seconds,
@@ -111,6 +123,10 @@ def transcription_jobs_for_mode(mode: str) -> tuple[TranscriptionJob, ...]:
     normalized = mode.strip().lower()
     if normalized == "none":
         return ()
+    if normalized == "qwen3":
+        return (TranscriptionJob(
+            name="qwen3", engine="qwen3", mode="direct", model=DEFAULT_QWEN3_MODEL,
+        ),)
     if normalized == "quick":
         return (TranscriptionJob(
             name="direct", mode="direct", model="mlx-community/whisper-medium-mlx",
@@ -124,8 +140,11 @@ def transcription_jobs_for_mode(mode: str) -> tuple[TranscriptionJob, ...]:
                 name="chunked", mode="chunked",
                 model="mlx-community/whisper-large-v3-turbo",
             ),
+            TranscriptionJob(
+                name="qwen3", engine="qwen3", mode="direct", model=DEFAULT_QWEN3_MODEL,
+            ),
         )
-    raise ValueError("transcription mode must be quick, full, or none")
+    raise ValueError("transcription mode must be quick, full, qwen3, or none")
 
 
 @dataclass(frozen=True)
@@ -146,8 +165,8 @@ class PreprocessConfig:
 
     def __post_init__(self) -> None:
         policy = self.transcription_policy.strip().lower()
-        if policy not in {"quick", "full", "none", "custom"}:
-            raise ValueError("transcription policy must be quick, full, none, or custom")
+        if policy not in {"quick", "full", "qwen3", "none", "custom"}:
+            raise ValueError("transcription policy must be quick, full, qwen3, none, or custom")
         object.__setattr__(self, "transcription_policy", policy)
         object.__setattr__(self, "whisper_jobs", tuple(self.whisper_jobs))
 

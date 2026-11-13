@@ -17,11 +17,19 @@
 
 ### `ensub` - English Subtitle Extraction（英文参考字幕提取）
 
-检查视频字幕轨并提取支持的文本参考字幕。它只负责字幕提取，不负责音频提取、Whisper 转录或正式字幕制作。
+检查视频字幕轨并提取支持的文本参考字幕。它只负责字幕提取，不负责音频提取、ASR 转录或正式字幕制作。
 
 ### `trans` - Transcription（音频提取与转录）
 
-从媒体提取归档音频和 Whisper 使用的 WAV，并按问答选择 direct、chunked 或不转录。它不提取字幕，也不生成正式 ASS。
+从媒体提取归档音频和 ASR 使用的 WAV，并按问答选择转录策略。默认 `full` 依次执行
+Whisper medium 整段、Whisper large-v3-turbo 切片（240 秒、重叠 5 秒）、
+Qwen3-ASR 1.7B 8-bit 整段。还可以选择 `quick`（仅 Whisper medium）、`qwen3`
+（仅 Qwen）、`none`（只提取音频），或在 `custom` 中选择引擎和模型。
+
+Qwen 默认模型为 `mlx-community/Qwen3-ASR-1.7B-8bit`，只支持 `direct` 整段输入，
+不接受 bmlsub 外部切片或手工切点；上游 `mlx-qwen3-asr` 内部仍会处理长音频分块。
+Qwen JSON 的时间标记是音频块边界，不是逐句或逐词对齐时间。
+`trans` 不提取字幕，也不生成正式 ASS。
 
 ### `pubinfo` - Publication Information（发布信息配置）
 

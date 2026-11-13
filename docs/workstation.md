@@ -10,10 +10,38 @@ Workstation 把一个单集分为三个阶段：预处理、人工交接、本�
 2. 创建或验证 `bgminfo/series.json`。
 3. 登记源视频并检查输入身份。
 4. 提取所有匹配的文本参考字幕。
-5. 提取归档音频和 Whisper 用 WAV。
-6. 按 `none`、`quick` 或 `full` 策略运行 direct/chunked 转录。
+5. 提取归档音频和 ASR 用 WAV。
+6. 按 `none`、`quick`、`qwen3` 或 `full` 策略运行转录。
 
 完成后停止在人工翻译、校对和字体收集边界。正式字幕或字体缺失时，`ws end` 会返回 `needs_review`，不会开始压制。
+
+### ASR 策略
+
+| 策略 | 任务及顺序 |
+| --- | --- |
+| `full`（默认） | Whisper medium 整段 → Whisper large-v3-turbo 切片 → Qwen3-ASR 整段 |
+| `quick` | 仅 Whisper medium 整段 |
+| `qwen3` | 仅 Qwen3-ASR 整段 |
+| `none` | 提取音频，不转录 |
+
+三项默认任务依次执行，分别生成结果：
+
+1. `direct`：`mlx-community/whisper-medium-mlx`，整段输入。
+2. `chunked`：`mlx-community/whisper-large-v3-turbo`，每片 240 秒、重叠 5 秒。
+3. `qwen3`：`mlx-community/Qwen3-ASR-1.7B-8bit`，`direct` 模式，整段输入。
+
+Qwen 的 `direct` 表示将完整 WAV 一次交给 `mlx-qwen3-asr`，bmlsub 不运行额外的
+FFmpeg 切片流程。上游模型库内部仍会在处理长音频时分块；JSON 中的时间标记为
+音频块边界，不能当作逐句或逐词对齐的字幕时间。转录是机器识别参考，需要人工校对。
+Qwen 只接受 `direct` 模式；`chunked`、`both` 和手工切点会返回明确错误。
+
+公开 `ws start` 命令通过问答选择上述策略；`build trans` 也提供仅 Qwen 和自定义
+引擎选项。底层 `Pipeline.transcribe` 支持 `engine="whisper"` 或 `engine="qwen3"`，
+省略 `model` 时使用对应默认模型。兼容 parser 的 `--transcription qwen3` 和
+`transcribe --engine qwen3` 与这两项设置对应，不是公开 `ws start` 的业务参数。
+
+MLX 后端需要 Apple Silicon，并通过 `[transcription]` 可选依赖安装。
+现有状态文件中的 `whisper_jobs` 键继续保留以兼容历史工作流，其中的任务可指定 Qwen 引擎。
 
 ## 人工交接
 
@@ -28,7 +56,7 @@ Workstation 把一个单集分为三个阶段：预处理、人工交接、本�
 ## `ws end`
 
 `ws end` 与 `ws start` 独立：不要求运行过 `start`，不要求参考轨、
-音频提取或 Whisper 转录成功，也不根据历史预处理状态决定能否制作。
+音频提取或 ASR 转录成功，也不根据历史预处理状态决定能否制作。
 只要番组元数据、源视频、正式 `<episode>.chs&jpn.ass` 和顶层字体已准备好，
 即可直接执行；没有 `workstation` 状态目录时会自行创建并登记输入。
 元数据问答与模板验证由两种命令共用，填写好的模板也可以由 `end` 自动提升。
